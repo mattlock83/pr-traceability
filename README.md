@@ -68,7 +68,7 @@ Omitting the input or passing an empty value preserves regex-only behavior. [Git
 
 ## Matching rules
 
-Jira references are case-sensitive and match `[A-Z][A-Z0-9]+-[1-9][0-9]*`, with no adjacent letter or number. Project keys have at least two uppercase alphanumeric characters, begin with a letter, and are followed by a positive issue number without leading zeroes. Punctuation, underscores, and slashes may separate references.
+Jira Cloud references are case-sensitive and match `[A-Z][A-Z0-9]{1,254}-[1-9][0-9]*`, with no adjacent letter or number. Project keys contain 2–255 uppercase ASCII letters or digits, begin with a letter, and are followed by a positive issue number without leading zeroes. Jira's default maximum project-key length is 10, but [sites can configure it up to 255](https://support.atlassian.com/jira-cloud-administration/docs/configure-jira-application-options/); the action accepts that full range. Punctuation, underscores, and slashes may separate references.
 
 | Text | Matches |
 | --- | --- |
