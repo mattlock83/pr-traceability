@@ -1,5 +1,6 @@
 import { appendFile, readFile } from 'node:fs/promises';
 import { findReferences } from './jira.mjs';
+import { applyJira } from './jira-integration.mjs';
 
 /** Check traceability using only the PR event and optional project allowlist. */
 export function check(event, { projectKeys = '' } = {}) {
@@ -36,7 +37,7 @@ export function check(event, { projectKeys = '' } = {}) {
   };
 }
 
-export async function run({ env = process.env, log = console.log } = {}) {
+export async function run({ env = process.env, log = console.log, fetchImpl = globalThis.fetch } = {}) {
   if (!['pull_request', 'pull_request_target'].includes(env.GITHUB_EVENT_NAME)) {
     throw new Error('This action requires a pull_request or pull_request_target event');
   }
@@ -52,7 +53,10 @@ export async function run({ env = process.env, log = console.log } = {}) {
   } catch {
     throw new Error('Cannot decode pull request event');
   }
-  const result = check(event, { projectKeys: env['INPUT_PROJECT-KEYS'] });
+  const result = await applyJira(check(event, { projectKeys: env['INPUT_PROJECT-KEYS'] }), event, {
+    secret: env['INPUT_JIRA-SECRET'], url: env['INPUT_JIRA-URL'],
+    remoteLinks: env['INPUT_JIRA-REMOTE-LINKS'], fetchImpl, log,
+  });
   const references = JSON.stringify(result.references);
   if (env.GITHUB_OUTPUT) {
     try {

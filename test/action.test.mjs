@@ -133,6 +133,82 @@ test('run: project-keys input filters action outputs', async (t) => {
   assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\nresult=passed\njira-references=["OPS-2"]\n');
 });
 
+test('run: optional Jira inputs validate allowed references and update remote links', async (t) => {
+  const env = await environment(t, event({ title: 'OTHER-1 TEAM-2', html_url: 'https://github.com/org/repo/pull/42' }));
+  Object.assign(env, {
+    'INPUT_PROJECT-KEYS': 'TEAM', 'INPUT_JIRA-URL': 'https://jira.example.com',
+    'INPUT_JIRA-SECRET': JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' }), 'INPUT_JIRA-REMOTE-LINKS': 'true',
+  });
+  const requests = [];
+  const result = await run({ env, log() {}, fetchImpl: async (url, options) => {
+    requests.push({ url, method: options.method });
+    if (options.method === 'POST') return Response.json({ id: 1 });
+    return Response.json({ fields: { status: { statusCategory: { key: 'new' } } } });
+  } });
+  assert.deepEqual(result.references, ['TEAM-2']);
+  assert.match(result.reason, /PR remote links updated/);
+  assert.deepEqual(requests, [
+    { url: 'https://jira.example.com/rest/api/3/issue/TEAM-2?fields=status,parent', method: 'GET' },
+    { url: 'https://jira.example.com/rest/api/3/issue/TEAM-2/remotelink', method: 'POST' },
+  ]);
+});
+
+test('run: Jira rejection writes no success output or credentials', async (t) => {
+  const env = await environment(t);
+  env['INPUT_JIRA-URL'] = 'https://jira.example.com';
+  env['INPUT_JIRA-SECRET'] = JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' });
+  await assert.rejects(run({ env, log: () => assert.fail('must not log success'), fetchImpl: async (url) => {
+    return Response.json({ fields: { status: { statusCategory: { key: 'done' } } } });
+  } }), (error) => /TEAM-1: Done; OPS-2: Done/.test(error.message) && !error.message.includes('secret-token'));
+  assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\n');
+});
+
+test('run: Jira response diagnostics reach the action logger and still fall back', async (t) => {
+  const env = await environment(t, event({ title: 'TEAM-1', head: { ref: 'feature/login' } }));
+  env['INPUT_JIRA-URL'] = 'https://jira.example.com';
+  env['INPUT_JIRA-SECRET'] = JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' });
+  const logs = [];
+  const checked = await run({ env, log: (message) => logs.push(message), fetchImpl: async () =>
+    new Response('Jira temporarily unavailable', { status: 503 }),
+  });
+  assert.equal(checked.status, 'passed');
+  assert.match(checked.reason, /regex-only/);
+  assert.equal(logs.length, 2);
+  assert.match(logs[0], /503.*Jira temporarily unavailable/);
+  assert.match(logs[1], /passed:/);
+});
+
+for (const merged of [true, false]) {
+  test(`run: closed-event Jira lifecycle (merged=${merged})`, async (t) => {
+    const body = event({ title: 'TEAM-1', html_url: 'https://github.com/org/repo/pull/42', merged });
+    body.action = 'closed';
+    const env = await environment(t, body);
+    Object.assign(env, {
+      'INPUT_JIRA-URL': 'https://jira.example.com',
+      'INPUT_JIRA-SECRET': JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' }), 'INPUT_JIRA-REMOTE-LINKS': 'true',
+    });
+    const requests = [];
+    const result = await run({ env, log() {}, fetchImpl: async (_, options) => {
+      requests.push(options);
+      return Response.json({ id: 1 });
+    } });
+    assert.equal(result.status, 'passed');
+    assert.equal(requests.length, merged ? 1 : 0);
+    if (merged) {
+      assert.equal(requests[0].method, 'POST');
+      assert.equal(JSON.parse(requests[0].body).object.status.resolved, true);
+    }
+  });
+}
+
+test('run: credentials cannot make missing traceability pass', async (t) => {
+  const env = await environment(t, event());
+  env['INPUT_JIRA-SECRET'] = JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' });
+  let requests = 0;
+  await assert.rejects(run({ env, fetchImpl: async () => { requests++; return Response.json({}); } }), /No issue reference found/);
+  assert.equal(requests, 0);
+});
+
 for (const [projectKeys, error] of [['OTHER', /allowed project \(OTHER\)/], ['TEAM,', /Invalid project-keys/]]) {
   test(`run: failure writes no outputs (${projectKeys})`, async (t) => {
     const env = await environment(t);
