@@ -1,13 +1,8 @@
 import { appendFile, readFile } from 'node:fs/promises';
 import { findReferences } from './jira.mjs';
-import { createJiraLookup } from './jira-api.mjs';
 
-/** Check the PR author and metadata before making any API requests. */
-export async function check(event, {
-  jiraSecret,
-  fetchImpl = globalThis.fetch,
-  signal = AbortSignal.timeout(5 * 60_000),
-} = {}) {
+/** Check traceability using only the PR event and optional project allowlist. */
+export function check(event, { projectKeys = '' } = {}) {
   const pr = event?.pull_request;
   if (!Number.isSafeInteger(pr?.number) || pr.number <= 0) {
     throw new Error('The event must contain a pull request');
@@ -22,46 +17,26 @@ export async function check(event, {
   if (/\bINC[0-9]+\b/.test(pr.title ?? '')) {
     return { status: 'passed', reason: 'PR title contains an incident reference', references: [] };
   }
-  // Exemptions above deliberately do not require Jira credentials or availability.
-  const references = findReferences(`${pr.title ?? ''}\n${pr.head?.ref ?? ''}`);
-  if (!references.length) {
-    throw new Error('No issue reference found: add a Jira key (e.g. PROJ-123) to the PR title or source branch; add an incident reference (e.g. INC123456) to the PR title; or apply the "no issue reference" label');
+  const projects = new Set(projectKeys.trim() ? projectKeys.split(',').map((key) => key.trim()) : []);
+  if ([...projects].some((key) => !/^[A-Z][A-Z0-9]{1,254}$/.test(key))) {
+    throw new Error('Invalid project-keys: use comma-separated uppercase Jira project keys, each 2–255 letters or digits starting with a letter (e.g. TEAM,OPS)');
   }
-  let fallback = false;
-  if (jiraSecret) {
-    let lookup;
-    try {
-      lookup = createJiraLookup(jiraSecret, { fetchImpl, signal });
-    } catch {
-      fallback = true;
-    }
-    const rejected = [];
-    if (lookup) {
-      for (const reference of references) {
-        try {
-          const status = await lookup(reference);
-          if (status !== 'active') rejected.push(`${reference}: ${status}`);
-        } catch {
-          // An integration failure must not erase another issue's real rejection.
-          fallback = true;
-        }
-      }
-    }
-    if (rejected.length) {
-      throw new Error(`Every referenced Jira issue must exist outside the Done status category (${rejected.join('; ')})`);
-    }
-    if (!fallback) {
-      return { status: 'passed', reason: 'All referenced issues exist in Jira and are outside Done', references };
-    }
+  const references = findReferences(`${pr.title ?? ''}\n${pr.head?.ref ?? ''}`)
+    .filter((reference) => !projects.size || projects.has(reference.slice(0, reference.indexOf('-'))));
+  if (!references.length) {
+    const requiredKey = projects.size
+      ? `a Jira key from an allowed project (${[...projects].join(', ')})`
+      : 'a Jira key (e.g. PROJ-123)';
+    throw new Error(`No issue reference found: add ${requiredKey} to the PR title or source branch; add an incident reference (e.g. INC123456) to the PR title; or apply the "no issue reference" label`);
   }
   return {
     status: 'passed',
-    reason: fallback ? 'Jira validation unavailable; passed regex-only check' : 'Jira reference found in PR title or source branch',
+    reason: 'Jira reference found in PR title or source branch',
     references,
   };
 }
 
-export async function run({ env = process.env, log = console.log, fetchImpl = globalThis.fetch } = {}) {
+export async function run({ env = process.env, log = console.log } = {}) {
   if (!['pull_request', 'pull_request_target'].includes(env.GITHUB_EVENT_NAME)) {
     throw new Error('This action requires a pull_request or pull_request_target event');
   }
@@ -77,8 +52,7 @@ export async function run({ env = process.env, log = console.log, fetchImpl = gl
   } catch {
     throw new Error('Cannot decode pull request event');
   }
-  const signal = AbortSignal.timeout(5 * 60_000);
-  const result = await check(event, { jiraSecret: env['INPUT_JIRA-SECRET'], fetchImpl, signal });
+  const result = check(event, { projectKeys: env['INPUT_PROJECT-KEYS'] });
   const references = JSON.stringify(result.references);
   if (env.GITHUB_OUTPUT) {
     try {

@@ -6,14 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { check, escapeAnnotation, run } from '../src/action.mjs';
-import { event, jiraNotFound } from './helpers.mjs';
-
-const jiraSecret = JSON.stringify({
-  baseUrl: 'https://example.atlassian.net', email: 'ci@example.com', apiToken: 'secret-token',
-});
-const jiraIssue = (category) => Response.json({
-  fields: { status: { name: 'Custom status', statusCategory: { key: category } } },
-});
+import { event } from './helpers.mjs';
 
 for (const [name, fields, status, references = []] of [
   ['bot type', { user: { type: 'Bot', login: 'automation' } }, 'skipped'],
@@ -26,10 +19,8 @@ for (const [name, fields, status, references = []] of [
   ['branch key', { head: { ref: 'feature/TEAM-123-fix' } }, 'passed', ['TEAM-123']],
   ['deduplicate title and branch', { title: 'TEAM-123', head: { ref: 'TEAM-123-OPS-4' } }, 'passed', ['TEAM-123', 'OPS-4']],
 ]) {
-  test(`check: ${name} requires no API call`, async () => {
-    let calls = 0;
-    const result = await check(event(fields), { fetchImpl: async () => { calls++; throw new Error('unexpected request'); } });
-    assert.equal(calls, 0);
+  test(`check: ${name}`, () => {
+    const result = check(event(fields));
     assert.equal(result.status, status);
     assert.deepEqual(result.references, references);
   });
@@ -46,16 +37,73 @@ for (const [name, fields] of [
   ['base branch ignored', { base: { ref: 'TEAM-123' } }],
   ['no match', { title: 'Fix' }],
 ]) {
-  test(`check: ${name} fails`, async () => {
-    await assert.rejects(check(event(fields)), /No issue reference found/);
+  test(`check: ${name} fails`, () => {
+    assert.throws(() => check(event(fields)), /No issue reference found/);
   });
 }
 
-test('check: missing or invalid PR fails', async () => {
+test('check: missing or invalid PR fails', () => {
   for (const invalid of [null, {}, event({ number: 0 }), event({ number: '1' }), event({ number: -1 })]) {
-    await assert.rejects(check(invalid), /must contain a pull request/);
+    assert.throws(() => check(invalid), /must contain a pull request/);
   }
 });
+
+for (const projectKeys of ['', ' \t\n', 'TEAM', 'TEAM,OPS', ' TEAM , OPS , TEAM ']) {
+  test(`project-keys: allowed title reference (${JSON.stringify(projectKeys)})`, () => {
+    assert.deepEqual(check(event({ title: 'TEAM-123' }), { projectKeys }).references, ['TEAM-123']);
+  });
+}
+
+test('project-keys: combines title and branch, filters other projects, and deduplicates', () => {
+  const result = check(event({ title: 'OTHER-1 OPS-2 TEAM-3', head: { ref: 'feature/TEAM-3-OPS-4-OTHER-5' } }), {
+    projectKeys: 'TEAM,OPS',
+  });
+  assert.equal(result.status, 'passed');
+  assert.deepEqual(result.references, ['OPS-2', 'TEAM-3', 'OPS-4']);
+});
+
+test('project-keys: allowed branch reference passes despite an unrelated title reference', () => {
+  const result = check(event({ title: 'OTHER-1', head: { ref: 'feature/TEAM-2-fix' } }), { projectKeys: 'TEAM' });
+  assert.equal(result.status, 'passed');
+  assert.deepEqual(result.references, ['TEAM-2']);
+});
+
+for (const title of ['OTHER-1', 'TE-1', 'TEAM2-1', 'XTEAM-1', 'team-1', 'TEAM-01', 'No reference']) {
+  test(`project-keys: ${title} cannot satisfy TEAM`, () => {
+    assert.throws(() => check(event({ title }), { projectKeys: 'TEAM' }), /allowed project \(TEAM\)/);
+  });
+}
+
+for (const projectKeys of ['A2', 'AB', 'A'.repeat(255)]) {
+  test(`project-keys: accepts valid ${projectKeys.length}-character project`, () => {
+    const reference = `${projectKeys}-1`;
+    assert.deepEqual(check(event({ title: reference }), { projectKeys }).references, [reference]);
+  });
+}
+
+for (const projectKeys of [
+  'A', 'A'.repeat(256), 'team', '2TEAM', 'MY_TEAM', 'TEAM-1', 'TÉAM',
+  'TEAM.*', 'TEAM|OPS', '*', 'TEAM OPS', 'TEAM\nOPS',
+  ',', ',TEAM', 'TEAM,', 'TEAM,,OPS', 'TEAM, ,OPS', 'TEAM,ops',
+]) {
+  test(`project-keys: rejects invalid configuration ${JSON.stringify(projectKeys)}`, () => {
+    assert.throws(() => check(event({ title: 'TEAM-1' }), { projectKeys }), /Invalid project-keys/);
+  });
+}
+
+for (const [fields, status] of [
+  [{ user: { type: 'Bot' } }, 'skipped'],
+  [{ title: 'INC123456' }, 'passed'],
+  [{ labels: [{ name: 'no issue reference' }] }, 'passed'],
+]) {
+  test(`project-keys: exemption takes precedence (${JSON.stringify(fields)})`, () => {
+    for (const projectKeys of ['TEAM', 'invalid']) {
+      const result = check(event({ title: 'OTHER-1', ...fields }), { projectKeys });
+      assert.equal(result.status, status);
+      assert.deepEqual(result.references, []);
+    }
+  });
+}
 
 async function environment(t, body = event({ title: 'TEAM-1 and OPS-2' })) {
   const directory = await mkdtemp(join(tmpdir(), 'pr-traceability-'));
@@ -67,29 +115,41 @@ async function environment(t, body = event({ title: 'TEAM-1 and OPS-2' })) {
   return { GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath };
 }
 
-test('run: appends action outputs and logs the result without a GitHub token', async (t) => {
+test('run: appends action outputs and logs the result without network access', async (t) => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => assert.fail('unexpected network request'));
   const env = await environment(t);
   const logs = [];
   await run({ env, log: (text) => logs.push(text) });
+  assert.equal(fetch.mock.callCount(), 0);
   assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\nresult=passed\njira-references=["TEAM-1","OPS-2"]\n');
   assert.match(logs[0], /passed: Jira reference found/);
 });
 
-for (const secret of [undefined, jiraSecret, 'malformed secret']) {
-  test(`run: commit-only references fail without any API lookup (secret=${Boolean(secret)})`, async (t) => {
-    const body = event({ title: 'Fix login', head: { ref: 'feature/login' } });
-    body.commits = [{ message: 'TEAM-123: fix INC123456' }];
-    body.head_commit = { message: 'OPS-456' };
-    const env = await environment(t, body);
-    if (secret) env['INPUT_JIRA-SECRET'] = secret;
-    let calls = 0;
-    await assert.rejects(run({
-      env, fetchImpl: async () => { calls++; return jiraIssue('new'); },
-    }), /No issue reference found: add a Jira key \(e.g. PROJ-123\) to the PR title or source branch;/);
-    assert.equal(calls, 0);
+test('run: project-keys input filters action outputs', async (t) => {
+  const env = await environment(t);
+  env['INPUT_PROJECT-KEYS'] = 'OPS';
+  const result = await run({ env, log() {} });
+  assert.deepEqual(result.references, ['OPS-2']);
+  assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\nresult=passed\njira-references=["OPS-2"]\n');
+});
+
+for (const [projectKeys, error] of [['OTHER', /allowed project \(OTHER\)/], ['TEAM,', /Invalid project-keys/]]) {
+  test(`run: failure writes no outputs (${projectKeys})`, async (t) => {
+    const env = await environment(t);
+    env['INPUT_PROJECT-KEYS'] = projectKeys;
+    await assert.rejects(run({ env, log: () => assert.fail('must not report success') }), error);
     assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\n');
   });
 }
+
+test('run: commit-only references fail', async (t) => {
+  const body = event({ title: 'Fix login', head: { ref: 'feature/login' } });
+  body.commits = [{ message: 'TEAM-123: fix INC123456' }];
+  body.head_commit = { message: 'OPS-456' };
+  const env = await environment(t, body);
+  await assert.rejects(run({ env }), /No issue reference found/);
+  assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\n');
+});
 
 test('run: supports pull_request_target and missing output file variable', async (t) => {
   const env = await environment(t, event({ title: 'INC123456' }));
@@ -111,165 +171,20 @@ test('annotation escaping prevents injected workflow commands', () => {
   assert.equal(escapeAnnotation('bad%\r\n::warning::injected'), 'bad%25%0D%0A::warning::injected');
 });
 
-for (const fields of [{ title: 'TEAM-1' }, { head: { ref: 'feature/TEAM-1-fix' } }]) {
-  test(`Jira validation: title/branch passes with a non-Done issue (${JSON.stringify(fields)})`, async () => {
-    const result = await check(event(fields), { jiraSecret, fetchImpl: async () => jiraIssue('new') });
-    assert.equal(result.status, 'passed');
-    assert.deepEqual(result.references, ['TEAM-1']);
-    assert.match(result.reason, /All referenced issues exist in Jira and are outside Done/);
-  });
-}
-
-test('Jira validation: active issues do not excuse Done or missing issues across title and branch', async () => {
-  const calls = [];
-  await assert.rejects(check(event({ title: 'TEAM-1 TEAM-2', head: { ref: 'TEAM-3-TEAM-4' } }), {
-    jiraSecret,
-    fetchImpl: async (url) => {
-      const key = /issue\/([^?]+)/.exec(url)[1];
-      calls.push(key);
-      if (key === 'TEAM-2') return jiraIssue('done');
-      if (key === 'TEAM-3') return jiraNotFound();
-      return jiraIssue('indeterminate');
-    },
-  }), /Every referenced Jira issue must exist outside the Done status category \(TEAM-2: Done; TEAM-3: not found or inaccessible\)/);
-  assert.deepEqual(calls, ['TEAM-1', 'TEAM-2', 'TEAM-3', 'TEAM-4']);
-});
-
-for (const fields of [{ user: { type: 'Bot' } }, { title: 'INC123456' }, { labels: [{ name: 'no issue reference' }] }]) {
-  test(`Jira validation: exemption bypasses even malformed secrets (${JSON.stringify(fields)})`, async () => {
-    const result = await check(event(fields), {
-      jiraSecret: 'malformed secret', fetchImpl: async () => assert.fail('should not read Jira'),
-    });
-    assert.deepEqual(result.references, []);
-  });
-}
-
-test('run: empty Jira secret keeps regex-only behavior', async (t) => {
-  const env = await environment(t);
-  env['INPUT_JIRA-SECRET'] = '';
-  const result = await run({ env, log() {}, fetchImpl: async () => assert.fail('should not fetch') });
-  assert.deepEqual(result.references, ['TEAM-1', 'OPS-2']);
-});
-
-test('run: Jira validates all distinct title/branch keys and ignores commit keys', async (t) => {
-  const body = event({ title: 'TEAM-1 TEAM-2', head: { ref: 'feature/TEAM-1-TEAM-3' } });
-  body.commits = [{ message: 'DONE-1' }];
-  const env = await environment(t, body);
-  env['INPUT_JIRA-SECRET'] = jiraSecret;
-  const requests = [];
-  const result = await run({
-    env, log() {},
-    fetchImpl: async (url, options) => {
-      requests.push({ url, authorization: options.headers.Authorization });
-      return jiraIssue(url.includes('TEAM-1') ? 'new' : 'indeterminate');
-    },
-  });
-  assert.deepEqual(requests.map(({ url }) => url), ['TEAM-1', 'TEAM-2', 'TEAM-3'].map((key) =>
-    `https://example.atlassian.net/rest/api/3/issue/${key}?fields=status`));
-  for (const request of requests) assert.match(request.authorization, /^Basic /);
-  assert.deepEqual(result.references, ['TEAM-1', 'TEAM-2', 'TEAM-3']);
-  assert.match(result.reason, /All referenced issues.*outside Done/);
-  assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\nresult=passed\njira-references=["TEAM-1","TEAM-2","TEAM-3"]\n');
-});
-
-for (const invalid of ['done', 'missing']) {
-  test(`run: ${invalid} branch issue fails despite an active title`, async (t) => {
-    const env = await environment(t, event({ title: 'TEAM-1', head: { ref: 'TEAM-2' } }));
-    env['INPUT_JIRA-SECRET'] = jiraSecret;
-    await assert.rejects(run({
-      env, log: () => assert.fail('must not report success'),
-      fetchImpl: async (url) => {
-        if (url.includes('TEAM-1')) return jiraIssue('new');
-        return invalid === 'done' ? jiraIssue('done') : jiraNotFound();
-      },
-    }), /Every referenced Jira issue must exist outside the Done status category \(TEAM-2:/);
-    assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\n');
-  });
-}
-
-test('run: Jira failure falls back without exposing the secret or claiming validation', async (t) => {
-  const env = await environment(t);
-  env['INPUT_JIRA-SECRET'] = jiraSecret;
-  const logs = [];
-  const result = await run({
-    env, log: (text) => logs.push(text),
-    fetchImpl: async () => new Response('secret-token', { status: 401 }),
-  });
-  assert.equal(result.status, 'passed');
-  assert.match(logs.join('\n'), /regex-only/);
-  assert.doesNotMatch(logs.join('\n'), /secret-token|401|All referenced issues/);
-  assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\nresult=passed\njira-references=["TEAM-1","OPS-2"]\n');
-});
-
-for (const [name, fetchImpl] of [
-  ...[301, 401, 403, 429, 500].map((status) => [`HTTP ${status}`, async () => new Response('secret-token', { status })]),
-  ['HTML 404', async () => new Response('<html>secret-token: route not found</html>', { status: 404 })],
-  ['empty 404', async () => new Response(null, { status: 404 })],
-  ['unrelated JSON 404', async () => Response.json({ message: 'secret-token: Not Found' }, { status: 404 })],
-  ['Jira routing 404', async () => Response.json({ errorMessages: ['secret-token: route not found'], errors: {} }, { status: 404 })],
-  ['network error', async () => { throw new Error('secret-token'); }],
-  ['timeout', async () => { throw new DOMException('secret-token', 'TimeoutError'); }],
-  ['malformed JSON', async () => new Response('secret-token')],
-  ['missing status', async () => Response.json({})],
-  ['unknown category', async () => jiraIssue('unknown')],
-]) {
-  test(`Jira fallback: ${name} uses the regex reference`, async () => {
-    const result = await check(event({ title: 'TEAM-1' }), { jiraSecret, fetchImpl });
-    assert.equal(result.status, 'passed');
-    assert.match(result.reason, /regex-only/);
-    assert.deepEqual(result.references, ['TEAM-1']);
-  });
-}
-
-test('Jira fallback: invalid secret uses title/branch matches but cannot pass without a reference', async () => {
-  const options = { jiraSecret: 'secret-token', fetchImpl: async () => assert.fail('should not fetch Jira') };
-  for (const fields of [{ title: 'TEAM-1' }, { head: { ref: 'TEAM-1' } }]) {
-    const result = await check(event(fields), options);
-    assert.deepEqual(result.references, ['TEAM-1']);
-    assert.match(result.reason, /regex-only/);
-  }
-  await assert.rejects(check(event(), options), /No issue reference found/);
-});
-
-for (const invalid of ['done', 'missing']) {
-  for (const errorFirst of [true, false]) {
-    test(`Jira fallback: ${invalid} still fails when another lookup errors, errorFirst=${errorFirst}`, async () => {
-      await assert.rejects(check(event({ title: errorFirst ? 'ERR-1 TEAM-1' : 'TEAM-1 ERR-1' }), {
-        jiraSecret,
-        fetchImpl: async (url) => {
-          if (url.includes('ERR-1')) throw new Error('secret-token');
-          return invalid === 'done' ? jiraIssue('done') : jiraNotFound();
-        },
-      }), /Every referenced Jira issue must exist outside the Done status category \(TEAM-1:/);
-    });
-  }
-}
-
-for (const invalid of ['done', 'missing']) {
-  for (const errorFirst of [true, false]) {
-    test(`Jira fallback: unrecognized 404 cannot hide ${invalid}, errorFirst=${errorFirst}`, async () => {
-      await assert.rejects(check(event({ title: errorFirst ? 'ERR-1 TEAM-1' : 'TEAM-1 ERR-1' }), {
-        jiraSecret,
-        fetchImpl: async (url) => {
-          if (url.includes('ERR-1')) return new Response('<html>secret-token</html>', { status: 404 });
-          return invalid === 'done' ? jiraIssue('done') : jiraNotFound();
-        },
-      }), new RegExp(`^Error: Every referenced Jira issue must exist outside the Done status category \\(TEAM-1: ${invalid === 'done' ? 'Done' : 'not found or inaccessible'}\\)$`));
-    });
-  }
-}
-
-for (const [name, body, eventName, status, text] of [
+for (const [name, body, eventName, status, text, projectKeys = ''] of [
   ['pass', event({ title: 'TEAM-123' }), 'pull_request', 0, /passed:/],
   ['skip bot', event({ user: { type: 'Bot' } }), 'pull_request', 0, /skipped:/],
   ['missing reference', event(), 'pull_request', 1, /::error::No issue reference found/],
   ['unsupported event', {}, 'push', 1, /::error::.*requires a pull_request/],
+  ['allowed project', event({ title: 'TEAM-123' }), 'pull_request', 0, /passed:/, 'TEAM'],
+  ['unlisted project', event({ title: 'OTHER-123' }), 'pull_request', 1, /::error::.*allowed project \(TEAM\)/, 'TEAM'],
+  ['invalid projects', event({ title: 'TEAM-123' }), 'pull_request', 1, /::error::Invalid project-keys/, 'TEAM,'],
 ]) {
   test(`entry point: ${name}`, async (t) => {
     const env = await environment(t, body);
     const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GITHUB_|INPUT_)/i.test(key)));
     const result = spawnSync(process.execPath, [fileURLToPath(new URL('../src/index.mjs', import.meta.url))], {
-      env: { ...baseEnv, ...env, GITHUB_EVENT_NAME: eventName },
+      env: { ...baseEnv, ...env, GITHUB_EVENT_NAME: eventName, 'INPUT_PROJECT-KEYS': projectKeys },
       encoding: 'utf8', timeout: 10_000,
     });
     assert.ifError(result.error);

@@ -4,14 +4,14 @@ branding:
   icon: link
   color: blue
 inputs:
-  jira-secret:
-    description: Optional JSON secret containing baseUrl, email, and apiToken. Checks every referenced issue exists outside Done; integration errors fall back to regex matching.
+  project-keys:
+    description: Optional comma-separated uppercase Jira project keys (e.g. TEAM,OPS). At least one reference must match an allowed project. Empty allows any project.
     required: false
 outputs:
   result:
     description: passed, or skipped when the PR author is a bot.
   jira-references:
-    description: JSON array of Jira keys; all verified issues after successful Jira validation, regex matches on fallback, or empty for exemptions.
+    description: JSON array of distinct matching Jira references, filtered by project-keys when supplied; empty for exemptions.
 runs:
   using: node24
   main: src/index.mjs
