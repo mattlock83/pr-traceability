@@ -1,0 +1,17 @@
+name: PR traceability
+description: Require a Jira reference in a PR title or source branch, with bot, incident, and label exemptions.
+branding:
+  icon: link
+  color: blue
+inputs:
+  jira-secret:
+    description: Optional JSON secret containing baseUrl, email, and apiToken. Checks every referenced issue exists outside Done; integration errors fall back to regex matching.
+    required: false
+outputs:
+  result:
+    description: passed, or skipped when the PR author is a bot.
+  jira-references:
+    description: JSON array of Jira keys; all verified issues after successful Jira validation, regex matches on fallback, or empty for exemptions.
+runs:
+  using: node24
+  main: src/index.mjs
