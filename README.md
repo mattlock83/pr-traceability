@@ -10,6 +10,22 @@ The check also succeeds when:
 
 The action checks syntax only: it makes no network requests and does not verify issue existence or status. No credentials, checkout, or runtime setup are needed in the consuming workflow. GitHub runs the source directly using its provided Node 24 runtime. No GitHub token or API permissions are required. The action supports Linux, macOS, and Windows runners. No Docker, npm install, bundler, compiled binaries, or external packages are required.
 
+## Why PR titles and source branches?
+
+The purpose of this action is to help GitHub pull requests appear against the relevant issues in **Jira's development panel**. Your repository must already be connected through the [GitHub for Jira integration](https://support.atlassian.com/jira-cloud-administration/docs/use-the-github-for-jira-app/). This action enforces reference placement; the integration handles synchronization with Jira.
+
+Atlassian documents different linking rules for each kind of development information:
+
+| Where the issue key appears | What it links in Jira | Satisfies this action? |
+| --- | --- | --- |
+| PR title, such as `TEAM-123: Fix login` | The PR | Yes |
+| Source branch, such as `feature/TEAM-123-fix-login` | The branch and its PR | Yes |
+| Commit message only, such as `TEAM-123 Fix login` | That commit; it does not establish the GitHub PR link | No |
+
+A commit-only reference could therefore pass a broader check while leaving the PR absent from the issue's PR list. Atlassian supports linking a PR through its commits for **Bitbucket Cloud only**, so this action deliberately checks the PR title and source branch. See [Atlassian's development-reference rules](https://support.atlassian.com/jira-software-cloud/docs/reference-issues-in-your-development-work/).
+
+If you also want individual commits listed in Jira, include the key in their commit messages. A branch or PR reference does not replace those commit references. Bot, incident, and label exemptions allow the check to pass without establishing a Jira issue link.
+
 ## Usage
 
 Add `.github/workflows/pr-traceability.yml` to a consuming repository:
@@ -68,9 +84,9 @@ Jira Cloud references are case-sensitive and match `[A-Z][A-Z0-9]{1,254}-[1-9][0
 
 Incident references match `\bINC[0-9]+\b` **in the PR title only**. Any number of digits is accepted, including leading zeroes, so both `INC123456` and `INC0012345` pass. The label name must be exactly `no issue reference`, ignoring case.
 
-Custom Jira project-key formats are not configurable. Atlassian describes how [issue keys link GitHub development information to Jira](https://support.atlassian.com/jira-cloud-administration/docs/use-the-github-for-jira-app/).
+Custom Jira project-key formats are not configurable.
 
-Exemptions are checked first. References are extracted from the PR title and source branch, then filtered by `project-keys` when configured. Commit messages are ignored. This follows [Atlassian's documented PR linking rules](https://support.atlassian.com/jira-software-cloud/docs/reference-issues-in-your-development-work/): for GitHub, the key must be in the PR title or source branch to link the PR in Jira's development panel.
+Exemptions are checked first. References are extracted from the PR title and source branch, then filtered by `project-keys` when configured. Commit messages are ignored.
 
 ### Outputs
 
