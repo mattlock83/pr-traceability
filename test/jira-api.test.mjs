@@ -4,12 +4,12 @@ import { createJiraClient } from '../src/jira-api.mjs';
 
 const url = 'https://jira.example.com/jira/';
 const secret = JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' });
-const issue = (key = 'new', parent) => ({ fields: { status: { name: 'Custom status', statusCategory: { key } }, parent } });
+const issue = (key = 'new') => ({ fields: { status: { name: 'Custom status', statusCategory: { key } } } });
 const missing = () => Response.json({ errorMessages: ['Issue does not exist or you do not have permission to see it.'], errors: {} }, { status: 404 });
 
 test('Jira client: Cloud v3 email/API-token authentication', async () => {
   const client = createJiraClient({ url, secret, fetchImpl: async (requestUrl, options) => {
-    assert.equal(requestUrl, 'https://jira.example.com/jira/rest/api/3/issue/TEAM-1?fields=status,parent');
+    assert.equal(requestUrl, 'https://jira.example.com/jira/rest/api/3/issue/TEAM-1?fields=status,project,components');
     assert.equal(options.method, 'GET');
     assert.equal(options.redirect, 'manual');
     assert.equal(options.headers.Authorization, `Basic ${Buffer.from('ci@example.com:secret-token').toString('base64')}`);
@@ -24,7 +24,7 @@ test('Jira client: Cloud v3 email/API-token authentication', async () => {
 for (const baseUrl of ['https://example.atlassian.net', 'https://api.atlassian.com/ex/jira/cloud-id']) {
   test(`Jira client: configurable endpoint ${baseUrl}`, async () => {
     const client = createJiraClient({ secret: JSON.stringify({ baseUrl, ...JSON.parse(secret) }), fetchImpl: async (requestUrl) => {
-      assert.equal(requestUrl, `${baseUrl}/rest/api/3/issue/TEAM-1?fields=status,parent`);
+      assert.equal(requestUrl, `${baseUrl}/rest/api/3/issue/TEAM-1?fields=status,project,components`);
       return Response.json(issue());
     } });
     await client.getIssue('TEAM-1');
@@ -33,7 +33,7 @@ for (const baseUrl of ['https://example.atlassian.net', 'https://api.atlassian.c
 
 test('Jira client: explicit URL overrides secret baseUrl and issue paths are encoded', async () => {
   const client = createJiraClient({ url, secret: JSON.stringify({ baseUrl: 'https://unused.example', ...JSON.parse(secret) }), fetchImpl: async (requestUrl) => {
-    assert.equal(requestUrl, 'https://jira.example.com/jira/rest/api/3/issue/TEAM%2F1%3Fsecret?fields=status,parent');
+    assert.equal(requestUrl, 'https://jira.example.com/jira/rest/api/3/issue/TEAM%2F1%3Fsecret?fields=status,project,components');
     return Response.json(issue());
   } });
   await client.getIssue('TEAM/1?secret');
@@ -59,21 +59,15 @@ for (const invalid of ['', 'not-a-url', 'http://jira.internal:8080/jira', 'file:
 }
 
 for (const category of ['new', 'indeterminate', 'done']) {
-  test(`Jira client: reads ${category} and caches repeated issues`, async () => {
-    let calls = 0;
-    const client = createJiraClient({ url, secret, fetchImpl: async () => { calls++; return Response.json(issue(category)); } });
+  test(`Jira client: reads ${category} status category`, async () => {
+    const client = createJiraClient({ url, secret, fetchImpl: async () => Response.json(issue(category)) });
     assert.equal((await client.getIssue('TEAM-1')).fields.status.statusCategory.key, category);
-    await client.getIssue('TEAM-1');
-    assert.equal(calls, 1);
   });
 }
 
-test('Jira client: recognized 404 reports missing and caches it', async () => {
-  let calls = 0;
-  const client = createJiraClient({ url, secret, fetchImpl: async () => { calls++; return missing(); } });
+test('Jira client: recognized 404 reports missing', async () => {
+  const client = createJiraClient({ url, secret, fetchImpl: async () => missing() });
   assert.equal(await client.getIssue('TEAM-1'), null);
-  assert.equal(await client.getIssue('TEAM-1'), null);
-  assert.equal(calls, 1);
 });
 
 
@@ -118,7 +112,7 @@ for (const status of [302, 401, 403, 404, 429, 500, 200]) {
     });
     await assert.rejects(client.getIssue('TEAM-1'));
     assert.equal(logs.length, 1);
-    assert.equal(logs[0], `Jira GET /issue/TEAM-1?fields=status,parent: ${status}; body: ${JSON.stringify('Upstream diagnostic\n::error::plain text')}`);
+    assert.equal(logs[0], `Jira GET /issue/TEAM-1?fields=status,project,components: ${status}; body: ${JSON.stringify('Upstream diagnostic\n::error::plain text')}`);
     assert.doesNotMatch(logs[0], /Authorization|Accept|X-Private-Header|must-not-appear|[\r\n]/);
   });
 }
@@ -148,7 +142,7 @@ test('Jira client: transport errors log no raw exception or headers', async () =
     throw new Error('Authorization: secret-token; X-Private: hidden');
   } });
   await assert.rejects(client.getIssue('TEAM-1'));
-  assert.deepEqual(logs, ['Jira GET /issue/TEAM-1?fields=status,parent: request failed; body: "Response body unavailable"']);
+  assert.deepEqual(logs, ['Jira GET /issue/TEAM-1?fields=status,project,components: request failed; body: "Response body unavailable"']);
 });
 
 test('Jira client: successful responses are not logged', async () => {
@@ -179,7 +173,7 @@ test('Jira client: cancels an in-flight request using the shared deadline', asyn
   await assert.rejects(client.getIssue('TEAM-1'), /^Error: Jira request failed or returned an invalid response$/);
 });
 
-test('Jira client: remote link upserts use the same globalId across reruns and merges', async () => {
+test('Jira client: remote link creation has a stable identity and plain title across reruns', async () => {
   const requests = [];
   const client = createJiraClient({ url, secret, fetchImpl: async (requestUrl, options) => {
     assert.equal(requestUrl, 'https://jira.example.com/jira/rest/api/3/issue/TEAM-1/remotelink');
@@ -195,11 +189,11 @@ test('Jira client: remote link upserts use the same globalId across reruns and m
   assert.equal(new Set(requests.map((body) => body.globalId)).size, 1);
   assert.equal(requests[0].globalId, 'org/repo/42');
   assert.equal(requests[0].object.url, pr.html_url);
-  assert.equal(requests[0].object.status.resolved, false);
   assert.equal(requests[0].object.title, 'PR #42: TEAM-1: Fix login');
-  assert.equal(requests[2].object.status.resolved, true);
-  assert.deepEqual(requests[2], { ...requests[0], object: { ...requests[0].object, title: 'PR #42: TEAM-1: Fix login [Merged]', status: { resolved: true } } });
-  assert.equal(requests[3].object.title, 'PR #42: Updated title [Merged]');
+  assert.deepEqual(requests[1], requests[0]);
+  assert.deepEqual(requests[2], requests[0]);
+  assert.equal(requests[3].object.title, 'PR #42: Updated title');
+  for (const request of requests) assert.ok(!Object.hasOwn(request.object, 'status'));
 });
 
 test('Jira client: invalid PR links and remote link responses are rejected', async () => {

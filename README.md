@@ -1,6 +1,11 @@
 # PR traceability
 
-A GitHub Action written in plain JavaScript, with no dependencies or build step. Requires a Jira issue reference in a pull request's **title** or **source branch name**. It works without configuration using regex matching. Optionally restrict matching to specific project keys, validate issues and their parents against Jira, or create PR remote links in Jira.
+A GitHub Action written in plain JavaScript, with no external dependencies or build step. It requires a Jira issue reference in a pull request's **title** or **source branch name** and works without configuration or a Jira secret.
+
+- **Traceability:** find and deduplicate Jira references, optionally restricted to specific project keys.
+- **Jira validation, with a secret:** check that every matching issue exists and is outside the Done status category. Integration errors fall back to the regex check.
+- **Repository components, with a secret:** on PR open, create or reuse an `org/repo` component in each referenced Jira project and assign it to the referenced issues.
+- **Optional remote links:** on PR open, link the PR from each validated referenced Jira issue.
 
 The check also succeeds when:
 
@@ -20,9 +25,12 @@ Atlassian documents different linking rules for each kind of development informa
 | --- | --- | --- |
 | PR title, such as `TEAM-123: Fix login` | The PR | Yes |
 | Source branch, such as `feature/TEAM-123-fix-login` | The branch and its PR | Yes |
+| PR description | The PR | No; outside this action's current scope |
 | Commit message only, such as `TEAM-123 Fix login` | That commit; it does not establish the GitHub PR link | No |
 
 A commit-only reference could therefore pass a broader check while leaving the PR absent from the issue's PR list. Atlassian supports linking a PR through its commits for **Bitbucket Cloud only**, so this action deliberately checks the PR title and source branch. See [Atlassian's development-reference rules](https://support.atlassian.com/jira-software-cloud/docs/reference-issues-in-your-development-work/).
+
+The native GitHub integration [also recognizes issue keys in PR descriptions](https://jira.atlassian.com/browse/JRACLOUD-98420). This action currently enforces the narrower title/branch rule. It does not parse description commands or transition issue statuses.
 
 If you also want individual commits listed in Jira, include the key in their commit messages. A branch or PR reference does not replace those commit references. Bot, incident, and label exemptions allow the check to pass without establishing a Jira issue link.
 
@@ -35,7 +43,7 @@ name: PR traceability
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, edited, labeled, unlabeled, closed]
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
 
 permissions: {}
 
@@ -50,7 +58,7 @@ Pin to a release tag or full commit SHA when publishing a stable version. The ac
 
 Title edits, new commits, and adding or removing labels rerun the check. Commit messages, PR descriptions, the base branch, the event sender, and the workflow actor do not count. Bot detection uses the PR author's GitHub `type: Bot` or a login ending in `[bot]`; ordinary user accounts used for automation are not automatically exempt.
 
-The `closed` event runs when a PR is merged or closed without merging. Regex checks and exemptions still apply. Jira validation runs on open-PR events. On merge, optional remote links are marked resolved without rechecking Jira status, so issues completed during the merge can still receive the link update. Closing without merging makes no Jira requests.
+The workflow does not need the `closed` event. If included, regex checks and exemptions still apply, but closing or merging a PR makes no Jira requests.
 
 Fork PRs work in regex-only mode, subject to GitHub's normal workflow approval settings. GitHub normally withholds repository secrets from fork PR workflows, so Jira checks and links are skipped when the secret is unavailable. `pull_request_target` is also supported if Jira access is required for forks; keep the action/workflow on trusted base-branch code, pin the action, and do not check out or execute PR code.
 
@@ -72,58 +80,100 @@ Bot, incident, and label exemptions take precedence over project configuration.
 
 ## Optional Jira integration
 
-The optional integration supports **Jira Cloud only**, using [REST API v3](https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/). Set `jira-secret` to a JSON credential stored in GitHub Actions secrets, and set `jira-url` to the API base URL:
+The optional integration supports **Jira Cloud only**, using [REST API v3](https://developer.atlassian.com/cloud/jira/platform/rest/v3/intro/). This complete workflow enables validation, repository components, and remote links:
 
 ```yaml
-- uses: phrond/pr-traceability@main
-  with:
-    project-keys: 'TEAM,OPS' # Optional
-    jira-url: 'https://your-team.atlassian.net'
-    jira-secret: ${{ secrets.JIRA_SECRET }}
-    jira-remote-links: 'true' # Optional; defaults to false
+name: PR traceability
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  traceability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: phrond/pr-traceability@main
+        with:
+          project-keys: 'TEAM,OPS' # Optional
+          jira-url: 'https://your-team.atlassian.net'
+          jira-secret: ${{ secrets.JIRA_SECRET }}
+          jira-remote-links: 'true' # Optional; defaults to false
 ```
 
-### Credentials and URL
+| Input | Default | Purpose |
+| --- | --- | --- |
+| `project-keys` | Empty | Allow any valid project key, or supply a comma-separated allowlist. |
+| `jira-secret` | Empty | Enable Jira validation and repository components using JSON credentials. |
+| `jira-url` | Empty | Jira API base URL; required with a secret unless its JSON contains `baseUrl`. |
+| `jira-remote-links` | `false` | Set to `true` to create PR remote links on the `opened` event. Requires a Jira secret. |
 
-For **Jira Cloud**, the secret contains your account email and API token:
+If `JIRA_SECRET` is absent or empty, the same workflow runs the regex check without making any Jira requests. The URL and remote-link setting have no effect without a secret.
+
+### Jira secret requirements
+
+1. [Create an Atlassian API token](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/) for an account with access to the relevant Jira projects.
+2. In the consuming GitHub repository, open **Settings → Secrets and variables → Actions** and create a repository secret named **`JIRA_SECRET`**. An organization secret shared with the repository also works.
+3. Store the following JSON as the secret value, using the token owner's email and token. Use an API token, not the account password; do not Base64-encode the JSON.
 
 ```json
 {"email":"ci@example.com","apiToken":"your-api-token"}
 ```
 
-Use your site URL with an unscoped token. For a scoped Cloud token, use `https://api.atlassian.com/ex/jira/<cloud-id>` as `jira-url`, following [Atlassian's token guidance](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account).
+Use `https://your-team.atlassian.net` as `jira-url` with an **unscoped token**. With a **scoped token**, use `https://api.atlassian.com/ex/jira/<cloud-id>` instead, following [Atlassian's token guidance](https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/). Tokens expire; replace the GitHub secret when rotating the token.
 
-Use an HTTPS URL without `/rest/api/3` appended. Alternatively, put `baseUrl` in the JSON secret; an explicit `jira-url` takes precedence.
+The URL must use HTTPS and must not include credentials, query parameters, a fragment, or `/rest/api/3`. Alternatively, include `baseUrl` in the JSON secret; an explicit `jira-url` takes precedence.
+
+The account needs the following Jira permissions. For scoped tokens, Atlassian's recommended classic scopes are listed alongside them; token scopes do not grant permissions the account lacks.
+
+| Operation | Account permissions and Jira requirements | Classic token scope |
+| --- | --- | --- |
+| [Validate issues](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-get) and look up components | Browse projects, including access under any issue security rules | `read:jira-work` |
+| [Assign components](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-put) | Edit issues, with the Components field editable | `write:jira-work` |
+| [Create missing components](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-project-components/#api-rest-api-3-component-post) | Administer projects in each affected project, or Administer Jira | `manage:jira-project` |
+| [Create/update remote links](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/#api-rest-api-3-issue-issueidorkey-remotelink-post) | Browse projects and Link issues; issue linking must be enabled | `write:jira-work` |
+
+Component assignment is automatic on PR open when a secret is supplied. Creation permission is unnecessary when the component already exists. Missing write permissions leave the traceability check successful and report incomplete updates.
 
 ### Validation and fallback
 
-With credentials supplied, **every matching reference** must exist and have a `statusCategory.key` other than `done`. Its immediate parent, if present, must also be outside Done. The parent reference comes from Jira, so parent existence is not a separate validation requirement; the parent is fetched to read its status. Checks use the status category rather than a status name such as Closed, Released, or Complete.
+With credentials supplied, **every matching reference** must exist and have a `statusCategory.key` other than `done`. Checks use the status category rather than a status name such as Closed, Released, or Complete.
 
-The client reads Cloud’s `fields.parent` directly, with no legacy custom-field discovery. Parent lookups are shared across references. Only the immediate parent is checked, not all ancestors, and the parent can belong to a project outside `project-keys`. Remote links are written only to the referenced issues, not automatically to their parents.
+Only matching references from the PR title or source branch are validated and eligible for components and remote links. Parent issues and epics are checked only if they are themselves referenced in the PR title or source branch and match `project-keys` when configured.
 
-Malformed credentials or responses, authentication failures, rate limits, connection errors, and timeouts fall back to regex matching. A confirmed missing/inaccessible referenced issue or Done issue/parent still fails, even if another request errors. An unreadable parent status, including a parent lookup returning 404, falls back to regex matching. Only recognized Jira issue-not-found 404 bodies count as missing issues; HTML, empty, and unrelated JSON 404s fall back. Jira can return the same recognized 404 for missing issues and permission/configuration problems, so those cannot always be distinguished. Failed HTTP responses log the status and response body for triage; invalid JSON responses are also logged. Request and response headers are never logged. Credential values are redacted if echoed in a response body, and bodies are quoted on one line so their contents cannot become workflow commands. Network errors without a response log that no body is available.
+Malformed credentials or responses, authentication failures, rate limits, connection errors, and timeouts fall back to regex matching. A confirmed missing/inaccessible referenced issue or Done referenced issue still fails, even if another request errors. Only recognized Jira issue-not-found 404 bodies count as missing issues; HTML, empty, and unrelated JSON 404s fall back. Jira can return the same recognized 404 for missing issues and permission/configuration problems, so those cannot always be distinguished. Failed HTTP responses log the status and response body for triage; invalid JSON responses are also logged. Request and response headers are never logged. Credential values are redacted if echoed in a response body, and bodies are quoted on one line so their contents cannot become workflow commands. Network errors without a response log that no body is available.
 
 Requests have a 10-second timeout and share a 30-second total budget per action run. A fallback still requires a regex reference from an allowed project; API failure never excuses missing traceability. Bot, incident, and label exemptions bypass all Jira checks and writes. With no secret, all Jira features are skipped.
 
-The Jira account needs permission to browse referenced issues and their parents. Enabling remote links additionally requires issue linking to be enabled and the relevant edit/link permissions. Use a token with the corresponding read/write scopes.
+### Repository components
+
+When `jira-secret` is supplied, a PR's **`opened` event** ensures a Jira component named after the base repository, such as `OpenAI/codex`, exists in each referenced issue's project and assigns it to that issue. Fork PRs use the destination repository's name. No additional input is needed. Multiple issues in one project share the same component; references in different projects receive a component in each project, using the project returned by Jira.
+
+Existing issue components are preserved. The action skips existing assignments, reuses component IDs returned during validation, and otherwise tries an [additive update by component name](https://support.atlassian.com/automation/kb/add-components-to-jira-work-items-using-automation/). A recognized missing-component response triggers creation and assignment; unrelated or unrecognized errors skip the assignment without creating anything. If another run creates the component first, or its name uses different casing, a fallback lookup reuses it. Rerunning the opened event skips existing assignments.
+
+For a single referenced issue, component handling uses these additional calls beyond issue validation and optional remote links:
+
+| Component state | Additional API calls |
+| --- | --- |
+| Already assigned | 0 |
+| Exists with the repository name, but not assigned | 1 issue update |
+| Does not exist | 3: rejected issue update, component creation, issue update |
+
+Creation results are shared within each project. A casing mismatch or concurrent creation can require an additional lookup; these are fallback paths rather than calls on every run.
+
+Component writes run after issue validation and apply only to successfully validated references. A confirmed missing or Done reference prevents all writes. Component errors are logged and reported without failing the traceability check; other projects and remote links can still update. Other events, including `reopened`, `edited`, and merge, do not create or assign components. References introduced after opening do not automatically receive a component.
+
+This requires Jira components in a [company-managed project](https://support.atlassian.com/jira-software-cloud/docs/what-are-jira-components/); Compass components and team-managed projects are not supported. See the permissions above.
 
 ### PR remote links
 
-Set `jira-remote-links: 'true'` to create a remote link on each validated referenced issue. Repeated runs update the same link using a stable `globalId` in the form `org/repo/PR-number` (for example, `phrond/pr-traceability/42`). The link includes the PR number and title, with a `[Merged]` suffix added when the PR merges. On `closed` with `merged: true`, the action upserts the link with `object.status.resolved: true`, even if the Jira issue or its parent is now Done. It can create the resolved link if no earlier run created it. It does not transition Jira issues or epics.
+Set `jira-remote-links: 'true'` with Jira credentials to create a remote link on each validated referenced issue during the PR's **`opened` event**. The link includes the PR number, title, and URL. A stable `globalId` in the form `org/repo/PR-number` (for example, `phrond/pr-traceability/42`) makes reruns update the same link instead of creating duplicates. See the [Jira Cloud create/update API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/).
 
-Jira uses the resolved flag for strikethrough rendering, but [Jira Cloud has a reported rendering limitation](https://jira.atlassian.com/browse/JRACLOUD-79720). The `[Merged]` title suffix keeps the merged state visible when strikethrough is absent; merge updates also set the resolved flag. See the [remote-link field documentation](https://developer.atlassian.com/server/jira/platform/using-fields-in-remote-issue-links/) and [v3 create/update API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/).
+Remote-link write errors do not fail the check; the result log reports incomplete updates. During validation fallback, links are written only for references whose issue checks completed successfully. Rerun the `opened` event to retry a failed write; the action uses that event's original title and references.
 
-Remote-link write errors do not fail the check; the result log reports incomplete updates. During validation fallback, links are written only for references whose issue and parent checks completed successfully. On merge, all current matching references are updated without Jira validation. References removed from the title/branch are not tracked or cleaned up, and closed-without-merge PRs leave their existing links unchanged. Rerun the merged event to retry a failed merge update.
-
-When remote links are enabled, serialize runs for each PR to reduce overlapping updates:
-
-```yaml
-concurrency:
-  group: pr-traceability-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
-```
-
-Use this workflow only for PR events. Avoid rerunning an old open-PR event after the PR has merged; runs use their original event snapshot, which could restore an unresolved link. The action does not query GitHub for live PR state.
+Other events do not update links. Later title changes, added or removed issue references, closing, and merging are not synchronized. Existing links are not cleaned up, marked resolved, or given a merged suffix. The action does not transition Jira issues or epics.
 
 ## Matching rules
 
@@ -176,8 +226,8 @@ node --test
 node --test --experimental-test-coverage
 ```
 
-CI runs the tests on Node 24 across Linux, macOS, and Windows. Tests cover matching, exemptions, project restrictions, action outputs, Jira Cloud v3 authentication, issue/parent checks, fallback, response logging, and remote-link updates. Jira tests use simulated responses and require no credentials or network access.
+CI runs the tests on Node 24 across Linux, macOS, and Windows. Tests cover matching, exemptions, project restrictions, action outputs, Jira Cloud v3 authentication, referenced-issue checks, fallback, response logging, repository components, and remote links on PR open. Jira tests use simulated responses and require no credentials or network access.
 
-The regex parser (`src/jira.mjs`) and synchronous `check()` function in `src/action.mjs` remain separate from Jira behavior. `src/jira-api.mjs` owns credentials and REST requests; `src/jira-integration.mjs` owns validation, fallback, and link lifecycle decisions. The action runner connects them.
+The regex parser (`src/jira.mjs`) and synchronous `check()` function in `src/action.mjs` remain separate from Jira behavior. `src/jira-api.mjs` owns credentials and REST requests; `src/jira-integration.mjs` owns validation, fallback, component assignment, and remote-link creation. The action runner connects them.
 
 The action reads `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, and `GITHUB_OUTPUT` from the runner. GitHub supplies inputs as `INPUT_PROJECT-KEYS`, `INPUT_JIRA-SECRET`, `INPUT_JIRA-URL`, and `INPUT_JIRA-REMOTE-LINKS`. For a local manual run, set the event variables and run `node src/index.mjs`. No GitHub token is needed.

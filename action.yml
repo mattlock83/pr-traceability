@@ -8,13 +8,13 @@ inputs:
     description: Optional comma-separated uppercase Jira project keys (e.g. TEAM,OPS). At least one reference must match an allowed project. Empty allows any project.
     required: false
   jira-secret:
-    description: Optional Jira Cloud JSON credentials containing email and apiToken. Enables issue and parent validation.
+    description: Optional Jira Cloud JSON credentials containing email and apiToken. Enables issue validation and creates/assigns the org/repo component on PR open.
     required: false
   jira-url:
     description: Jira Cloud HTTPS base URL. Required with jira-secret unless its JSON contains baseUrl. Uses REST API v3.
     required: false
   jira-remote-links:
-    description: Set to true to create PR remote links on referenced issues and mark them resolved when the PR merges. Requires Jira credentials.
+    description: Set to true to create PR remote links on validated referenced issues when the PR opens. Requires Jira credentials.
     required: false
     default: 'false'
 outputs:

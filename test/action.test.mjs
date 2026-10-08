@@ -133,8 +133,11 @@ test('run: project-keys input filters action outputs', async (t) => {
   assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\nresult=passed\njira-references=["OPS-2"]\n');
 });
 
-test('run: optional Jira inputs validate allowed references and update remote links', async (t) => {
-  const env = await environment(t, event({ title: 'OTHER-1 TEAM-2', html_url: 'https://github.com/org/repo/pull/42' }));
+test('run: optional Jira inputs validate allowed references and create remote links on open', async (t) => {
+  const body = event({ title: 'OTHER-1 TEAM-2', html_url: 'https://github.com/org/repo/pull/42' });
+  body.action = 'opened';
+  body.repository = { full_name: 'org/repo' };
+  const env = await environment(t, body);
   Object.assign(env, {
     'INPUT_PROJECT-KEYS': 'TEAM', 'INPUT_JIRA-URL': 'https://jira.example.com',
     'INPUT_JIRA-SECRET': JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' }), 'INPUT_JIRA-REMOTE-LINKS': 'true',
@@ -143,14 +146,56 @@ test('run: optional Jira inputs validate allowed references and update remote li
   const result = await run({ env, log() {}, fetchImpl: async (url, options) => {
     requests.push({ url, method: options.method });
     if (options.method === 'POST') return Response.json({ id: 1 });
-    return Response.json({ fields: { status: { statusCategory: { key: 'new' } } } });
+    return Response.json({ fields: {
+      status: { statusCategory: { key: 'new' } }, project: { key: 'TEAM' }, components: [{ id: '7', name: 'org/repo' }],
+    } });
   } });
   assert.deepEqual(result.references, ['TEAM-2']);
-  assert.match(result.reason, /PR remote links updated/);
+  assert.match(result.reason, /PR remote links created/);
   assert.deepEqual(requests, [
-    { url: 'https://jira.example.com/rest/api/3/issue/TEAM-2?fields=status,parent', method: 'GET' },
+    { url: 'https://jira.example.com/rest/api/3/issue/TEAM-2?fields=status,project,components', method: 'GET' },
     { url: 'https://jira.example.com/rest/api/3/issue/TEAM-2/remotelink', method: 'POST' },
   ]);
+});
+
+test('run: opened PR assigns the base repository component in every allowed referenced project', async (t) => {
+  const body = event({ title: 'OTHER-1 TEAM-1', head: { ref: 'feature/OPS-2', repo: { full_name: 'contributor/fork' } } });
+  body.action = 'opened';
+  body.repository = { full_name: 'OpenAI/codex' };
+  const env = await environment(t, body);
+  Object.assign(env, {
+    'INPUT_PROJECT-KEYS': 'TEAM,OPS', 'INPUT_JIRA-URL': 'https://jira.example.com',
+    'INPUT_JIRA-SECRET': JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' }),
+  });
+  const writes = [];
+  let opsComponentExists = false;
+  const checked = await run({ env, log() {}, fetchImpl: async (requestUrl, options) => {
+    const path = new URL(requestUrl).pathname;
+    if (options.method === 'PUT') {
+      if (path.endsWith('/OPS-2') && !opsComponentExists) {
+        return Response.json({ errors: { components: "Component name 'OpenAI/codex' is not valid" } }, { status: 400 });
+      }
+      writes.push({ path, body: JSON.parse(options.body) });
+      return new Response(null, { status: 204 });
+    }
+    if (options.method === 'POST') {
+      opsComponentExists = true;
+      writes.push({ path, body: JSON.parse(options.body) });
+      return Response.json({ id: '20', name: 'OpenAI/codex' }, { status: 201 });
+    }
+    if (path.endsWith('/components')) return Response.json(path.includes('/TEAM/') ? [{ id: '10', name: 'OpenAI/codex' }] : []);
+    const project = path.includes('TEAM-1') ? 'TEAM' : 'OPS';
+    assert.ok(path.includes('TEAM-1') || path.includes('OPS-2'), 'unallowed references must be ignored');
+    return Response.json({ fields: { status: { statusCategory: { key: 'new' } }, project: { key: project }, components: [{ id: '7' }] } });
+  } });
+  assert.equal(checked.status, 'passed');
+  assert.deepEqual(checked.references, ['TEAM-1', 'OPS-2']);
+  assert.deepEqual(writes, [
+    { path: '/rest/api/3/issue/TEAM-1', body: { update: { components: [{ add: { name: 'OpenAI/codex' } }] } } },
+    { path: '/rest/api/3/component', body: { name: 'OpenAI/codex', project: 'OPS' } },
+    { path: '/rest/api/3/issue/OPS-2', body: { update: { components: [{ add: { id: '20' } }] } } },
+  ]);
+  assert.match(await readFile(env.GITHUB_OUTPUT, 'utf8'), /result=passed/);
 });
 
 test('run: Jira rejection writes no success output or credentials', async (t) => {
@@ -179,7 +224,7 @@ test('run: Jira response diagnostics reach the action logger and still fall back
 });
 
 for (const merged of [true, false]) {
-  test(`run: closed-event Jira lifecycle (merged=${merged})`, async (t) => {
+  test(`run: closed event makes no Jira requests (merged=${merged})`, async (t) => {
     const body = event({ title: 'TEAM-1', html_url: 'https://github.com/org/repo/pull/42', merged });
     body.action = 'closed';
     const env = await environment(t, body);
@@ -193,11 +238,7 @@ for (const merged of [true, false]) {
       return Response.json({ id: 1 });
     } });
     assert.equal(result.status, 'passed');
-    assert.equal(requests.length, merged ? 1 : 0);
-    if (merged) {
-      assert.equal(requests[0].method, 'POST');
-      assert.equal(JSON.parse(requests[0].body).object.status.resolved, true);
-    }
+    assert.equal(requests.length, 0);
   });
 }
 

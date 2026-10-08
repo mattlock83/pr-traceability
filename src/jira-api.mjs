@@ -18,9 +18,9 @@ export function createJiraClient({ secret, url, fetchImpl = globalThis.fetch, si
     throw new Error('Invalid Jira URL or credentials');
   }
   const endpoint = `${baseUrl.href.replace(/\/+$/, '')}/rest/api/3`;
-  const issues = new Map();
+  const components = new Map();
 
-  async function request(path, { body, statuses = [200] } = {}) {
+  async function request(path, { body, method = body ? 'POST' : 'GET', statuses = [200] } = {}) {
     let status;
     let responseBody;
     let logged = false;
@@ -28,14 +28,14 @@ export function createJiraClient({ secret, url, fetchImpl = globalThis.fetch, si
       let detail = responseBody ?? 'Response body unavailable';
       for (const value of redactions) detail = detail.replaceAll(value, '[REDACTED]');
       // A single quoted line prevents response text from becoming workflow commands.
-      log(`Jira ${body ? 'POST' : 'GET'} ${path}: ${status ?? 'request failed'}; body: ${JSON.stringify(detail)}`);
+      log(`Jira ${method} ${path}: ${status ?? 'request failed'}; body: ${JSON.stringify(detail)}`);
       logged = true;
     }
     try {
       const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
       requestSignal.throwIfAborted();
       const response = await fetchImpl(`${endpoint}${path}`, {
-        method: body ? 'POST' : 'GET',
+        method,
         redirect: 'manual',
         headers: {
           Authorization: authorization,
@@ -51,7 +51,7 @@ export function createJiraClient({ secret, url, fetchImpl = globalThis.fetch, si
       responseBody = await response.text();
       if (!response.ok || !statuses.includes(status)) logFailure();
       if (!statuses.includes(status)) throw new Error();
-      return { status, data: JSON.parse(responseBody) };
+      return { status, data: status === 204 ? null : JSON.parse(responseBody) };
     } catch {
       if (!logged) logFailure();
       // Keep thrown errors generic; diagnostics above contain no request/response headers.
@@ -59,8 +59,8 @@ export function createJiraClient({ secret, url, fetchImpl = globalThis.fetch, si
     }
   }
 
-  async function readIssue(reference) {
-    const { status, data } = await request(`/issue/${encodeURIComponent(reference)}?fields=status,parent`, { statuses: [200, 404] });
+  async function getIssue(reference) {
+    const { status, data } = await request(`/issue/${encodeURIComponent(reference)}?fields=status,project,components`, { statuses: [200, 404] });
     if (status === 404) {
       if (Array.isArray(data?.errorMessages) && data.errorMessages.includes(missingIssueMessage)) return null;
       throw new Error('Unrecognized Jira issue-not-found response');
@@ -68,13 +68,73 @@ export function createJiraClient({ secret, url, fetchImpl = globalThis.fetch, si
     if (!['new', 'indeterminate', 'done'].includes(data?.fields?.status?.statusCategory?.key)) {
       throw new Error('Jira response is missing a recognized status category');
     }
+    // Issue validation already returns components; reuse their IDs across the project.
+    if (nonempty(data.fields.project?.key) && Array.isArray(data.fields.components)) {
+      for (const component of data.fields.components) {
+        if (nonempty(component?.id) && nonempty(component.name)) {
+          components.set(`${data.fields.project.key}/${component.name.toLowerCase()}`, Promise.resolve(component));
+        }
+      }
+    }
     return data;
   }
 
-  function getIssue(reference) {
-    // Parents can be shared by references, or be references themselves.
-    if (!issues.has(reference)) issues.set(reference, readIssue(reference));
-    return issues.get(reference);
+  async function findComponent(project, name) {
+    const { data } = await request(`/project/${encodeURIComponent(project)}/components`);
+    if (!Array.isArray(data)) throw new Error('Invalid Jira project components response');
+    return data.find((component) => typeof component?.name === 'string' && component.name.toLowerCase() === name.toLowerCase());
+  }
+
+  async function ensureComponent(project, name) {
+    const { status, data } = await request('/component', { body: { name, project }, statuses: [201, 400, 403] });
+    // Reuse a component created concurrently or with different casing, even without create permission.
+    const component = status === 201 ? data : await findComponent(project, name);
+    if (!nonempty(component?.id) || typeof component.name !== 'string' || component.name.toLowerCase() !== name.toLowerCase()) {
+      throw new Error('Invalid Jira component response');
+    }
+    return component;
+  }
+
+  async function assignRepositoryComponent(reference, issue, name) {
+    const project = issue.fields.project?.key;
+    const assigned = issue.fields.components;
+    if (!nonempty(project) || !Array.isArray(assigned) || assigned.some((component) => !nonempty(component?.id) && !nonempty(component?.name))) {
+      throw new Error('Jira issue is missing project or component information');
+    }
+    const cacheKey = `${project}/${name.toLowerCase()}`;
+    const existing = assigned.find((component) => typeof component.name === 'string' && component.name.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      components.set(cacheKey, Promise.resolve(existing));
+      return;
+    }
+    let component = components.has(cacheKey) ? await components.get(cacheKey) : { name };
+    const update = (component, statuses = [204]) => {
+      const value = component.id ? { id: component.id } : { name: component.name };
+      return request(`/issue/${encodeURIComponent(reference)}`, {
+        method: 'PUT', statuses, body: { update: { components: [{ add: value }] } },
+      });
+    };
+    if (!components.has(cacheKey)) {
+      // Existing components can be assigned by name in one call, without a lookup.
+      const { status, data } = await update(component, [204, 400]);
+      if (status === 204) {
+        components.set(cacheKey, Promise.resolve(component));
+        assigned.push(component);
+        return;
+      }
+      // A 400 can also mean the field is not editable. Only create for a missing name.
+      const errors = data?.errors ?? {};
+      const messages = data?.errorMessages ?? [];
+      if (errors.components !== `Component name '${name}' is not valid` ||
+          Object.keys(errors).length !== 1 || !Array.isArray(messages) || messages.length) {
+        throw new Error('Jira rejected the component assignment');
+      }
+      components.set(cacheKey, ensureComponent(project, name));
+      component = await components.get(cacheKey);
+    }
+    if (component.id && assigned.some(({ id }) => id === component.id)) return;
+    await update(component);
+    assigned.push(component);
   }
 
   async function upsertPullRequestLink(reference, pr) {
@@ -83,7 +143,6 @@ export function createJiraClient({ secret, url, fetchImpl = globalThis.fetch, si
     if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash ||
         !Number.isSafeInteger(pr.number) || pr.number <= 0 || typeof pr.title !== 'string' ||
         !pullRequest || pullRequest[3] !== String(pr.number)) throw new Error('Invalid pull request link');
-    const merged = pr.merged === true;
     const { data } = await request(`/issue/${encodeURIComponent(reference)}/remotelink`, {
       statuses: [200, 201],
       body: {
@@ -92,13 +151,12 @@ export function createJiraClient({ secret, url, fetchImpl = globalThis.fetch, si
         relationship: 'implemented by',
         object: {
           url: url.href,
-          title: `PR #${pr.number}: ${pr.title}${merged ? ' [Merged]' : ''}`,
-          status: { resolved: merged },
+          title: `PR #${pr.number}: ${pr.title}`,
         },
       },
     });
     if (!/^[1-9][0-9]*$/.test(String(data?.id))) throw new Error('Invalid Jira remote link response');
   }
 
-  return { getIssue, upsertPullRequestLink };
+  return { getIssue, assignRepositoryComponent, upsertPullRequestLink };
 }
