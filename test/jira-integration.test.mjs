@@ -39,7 +39,7 @@ function jira(issues = { 'TEAM-1': issue() }, { write } = {}) {
   return { fetchImpl, reads, writes, componentRequests };
 }
 
-for (const options of [{}, { secret: '' }, { secret: ' ' }, { remoteLinks: 'true' }]) {
+for (const options of [{}, { secret: '' }, { secret: ' ' }, { remoteLinks: 'true' }, { components: 'false' }, { components: 'invalid' }]) {
   test(`Jira integration: no secret makes no requests (${JSON.stringify(options)})`, async () => {
     const original = result();
     assert.equal(await applyJira(original, event(), { ...options, fetchImpl: () => assert.fail('unexpected request') }), original);
@@ -176,7 +176,7 @@ test('Jira integration: a parent is validated when it is separately referenced i
   assert.equal(mock.writes.length, 0);
 });
 
-for (const options of [{ secret: 'invalid' }, { url: 'invalid' }, { remoteLinks: 'yes' }]) {
+for (const options of [{ secret: 'invalid' }, { url: 'invalid' }, { remoteLinks: 'yes' }, { components: 'yes' }, { components: 'TRUE' }]) {
   test(`Jira integration: invalid config falls back (${JSON.stringify(options)})`, async () => {
     const checked = await applyJira(result(), event(), { secret, url, ...options, fetchImpl: () => assert.fail('unexpected request') });
     assert.equal(checked.status, 'passed');

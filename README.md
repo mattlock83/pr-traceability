@@ -4,13 +4,13 @@ A GitHub Action written in plain JavaScript, with no external dependencies or bu
 
 - **Traceability:** find and deduplicate Jira references, optionally restricted to specific project keys.
 - **Jira validation, with a secret:** check that every matching issue exists and is outside the Done status category. Integration errors fall back to the regex check.
-- **Repository components, with a secret:** on PR open, create or reuse an `org/repo` component in each referenced Jira project and assign it to the referenced issues.
+- **Repository components, enabled by default with a secret:** on PR open, create or reuse an `org/repo` component in each referenced Jira project and assign it to the referenced issues. Set `jira-components: 'false'` to disable this.
 - **Optional remote links:** on PR open, link the PR from each validated referenced Jira issue.
 
 The check also succeeds when:
 
 - The **PR author** is a bot (validation is skipped).
-- The **PR title** contains an incident reference such as `INC123456`.
+- The **PR title** contains a ServiceNow incident or request reference such as `INC123456` or `REQ1234`.
 - The PR has the **`no issue reference`** label.
 
 Without Jira credentials, the action checks syntax only and makes no network requests. GitHub runs the source directly using its provided Node 24 runtime; no checkout or runtime setup is needed in the consuming workflow. No GitHub token or API permissions are required. The action supports Linux, macOS, and Windows runners. No Docker, npm install, bundler, compiled binaries, or external packages are required.
@@ -32,7 +32,7 @@ A commit-only reference could therefore pass a broader check while leaving the P
 
 The native GitHub integration [also recognizes issue keys in PR descriptions](https://jira.atlassian.com/browse/JRACLOUD-98420). This action currently enforces the narrower title/branch rule. It does not parse description commands or transition issue statuses.
 
-If you also want individual commits listed in Jira, include the key in their commit messages. A branch or PR reference does not replace those commit references. Bot, incident, and label exemptions allow the check to pass without establishing a Jira issue link.
+If you also want individual commits listed in Jira, include the key in their commit messages. A branch or PR reference does not replace those commit references. Bot, ServiceNow incident/request, and label exemptions allow the check to pass without establishing a Jira issue link.
 
 ## Usage
 
@@ -76,7 +76,7 @@ With this configuration, at least one reference in the PR title or source branch
 
 Omitting the input, or leaving it empty or whitespace-only, allows any valid project key. Spaces around comma-separated keys are trimmed, and duplicates are ignored. Each entry must be an uppercase Jira Cloud project key: 2–255 letters or digits, starting with a letter. Supply project keys such as `TEAM`, not issue references such as `TEAM-123`. Invalid entries, including empty comma-separated entries, fail with a configuration error. Wildcards and custom regular expressions are not supported.
 
-Bot, incident, and label exemptions take precedence over project configuration.
+Bot, ServiceNow incident/request, and label exemptions take precedence over project configuration.
 
 ## Optional Jira integration
 
@@ -101,16 +101,18 @@ jobs:
           jira-url: 'https://your-team.atlassian.net'
           jira-secret: ${{ secrets.JIRA_SECRET }}
           jira-remote-links: 'true' # Optional; defaults to false
+          jira-components: 'true' # Optional; set to false to disable component creation and assignment
 ```
 
 | Input | Default | Purpose |
 | --- | --- | --- |
 | `project-keys` | Empty | Allow any valid project key, or supply a comma-separated allowlist. |
-| `jira-secret` | Empty | Enable Jira validation and repository components using JSON credentials. |
+| `jira-secret` | Empty | Enable Jira validation and configured Jira features using JSON credentials. |
 | `jira-url` | Empty | Jira API base URL; required with a secret unless its JSON contains `baseUrl`. |
 | `jira-remote-links` | `false` | Set to `true` to create PR remote links on the `opened` event. Requires a Jira secret. |
+| `jira-components` | `true` | Set to `false` to disable creating and assigning repository components on the `opened` event. Requires a Jira secret. |
 
-If `JIRA_SECRET` is absent or empty, the same workflow runs the regex check without making any Jira requests. The URL and remote-link setting have no effect without a secret.
+If `JIRA_SECRET` is absent or empty, the same workflow runs the regex check without making any Jira requests. The URL and Jira feature settings have no effect without a secret.
 
 ### Jira secret requirements
 
@@ -135,7 +137,7 @@ The account needs the following Jira permissions. For scoped tokens, Atlassian's
 | [Create missing components](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-project-components/#api-rest-api-3-component-post) | Administer projects in each affected project, or Administer Jira | `manage:jira-project` |
 | [Create/update remote links](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/#api-rest-api-3-issue-issueidorkey-remotelink-post) | Browse projects and Link issues; issue linking must be enabled | `write:jira-work` |
 
-Component assignment is automatic on PR open when a secret is supplied. Creation permission is unnecessary when the component already exists. Missing write permissions leave the traceability check successful and report incomplete updates.
+Component assignment is automatic on PR open when a secret is supplied, unless `jira-components: 'false'`. When disabled, component write permissions and scopes are unnecessary; Jira validation and optional remote links still run. Creation permission is unnecessary when the component already exists. Missing write permissions leave the traceability check successful and report incomplete updates.
 
 ### Validation and fallback
 
@@ -143,13 +145,15 @@ With credentials supplied, **every matching reference** must exist and have a `s
 
 Only matching references from the PR title or source branch are validated and eligible for components and remote links. Parent issues and epics are checked only if they are themselves referenced in the PR title or source branch and match `project-keys` when configured.
 
-Malformed credentials or responses, authentication failures, rate limits, connection errors, and timeouts fall back to regex matching. A confirmed missing/inaccessible referenced issue or Done referenced issue still fails, even if another request errors. Only recognized Jira issue-not-found 404 bodies count as missing issues; HTML, empty, and unrelated JSON 404s fall back. Jira can return the same recognized 404 for missing issues and permission/configuration problems, so those cannot always be distinguished. Failed HTTP responses log the status and response body for triage; invalid JSON responses are also logged. Request and response headers are never logged. Credential values are redacted if echoed in a response body, and bodies are quoted on one line so their contents cannot become workflow commands. Network errors without a response log that no body is available.
+Invalid Jira inputs, malformed credentials or responses, authentication failures, rate limits, connection errors, and timeouts fall back to regex matching. A confirmed missing/inaccessible referenced issue or Done referenced issue still fails, even if another request errors. Only recognized Jira issue-not-found 404 bodies count as missing issues; HTML, empty, and unrelated JSON 404s fall back. Jira can return the same recognized 404 for missing issues and permission/configuration problems, so those cannot always be distinguished. Failed HTTP responses log the status and response body for triage; invalid JSON responses are also logged. Request and response headers are never logged. Credential values are redacted if echoed in a response body, and bodies are quoted on one line so their contents cannot become workflow commands. Network errors without a response log that no body is available.
 
-Requests have a 10-second timeout and share a 30-second total budget per action run. A fallback still requires a regex reference from an allowed project; API failure never excuses missing traceability. Bot, incident, and label exemptions bypass all Jira checks and writes. With no secret, all Jira features are skipped.
+Requests have a 10-second timeout and share a 30-second total budget per action run. A fallback still requires a regex reference from an allowed project; API failure never excuses missing traceability. Bot, ServiceNow incident/request, and label exemptions bypass all Jira checks and writes. With no secret, all Jira features are skipped.
 
 ### Repository components
 
-When `jira-secret` is supplied, a PR's **`opened` event** ensures a Jira component named after the base repository, such as `OpenAI/codex`, exists in each referenced issue's project and assigns it to that issue. Fork PRs use the destination repository's name. No additional input is needed. Multiple issues in one project share the same component; references in different projects receive a component in each project, using the project returned by Jira.
+When `jira-secret` is supplied, a PR's **`opened` event** ensures a Jira component named after the base repository, such as `OpenAI/codex`, exists in each referenced issue's project and assigns it to that issue. Fork PRs use the destination repository's name. This is enabled by default; set `jira-components: 'false'` to skip all component creation and assignment. Jira issue validation and optional remote links continue to work. Multiple issues in one project share the same component; references in different projects receive a component in each project, using the project returned by Jira.
+
+`jira-components` accepts `true` or `false`, with surrounding whitespace trimmed. Omitting it or leaving it empty enables components. Invalid values fall back to the regex-only check, like other invalid Jira configuration.
 
 Existing issue components are preserved. The action skips existing assignments, reuses component IDs returned during validation, and otherwise tries an [additive update by component name](https://support.atlassian.com/automation/kb/add-components-to-jira-work-items-using-automation/). A recognized missing-component response triggers creation and assignment; unrelated or unrecognized errors skip the assignment without creating anything. If another run creates the component first, or its name uses different casing, a fallback lookup reuses it. Rerunning the opened event skips existing assignments.
 
@@ -187,7 +191,7 @@ Jira Cloud references are case-sensitive and match `[A-Z][A-Z0-9]{1,254}-[1-9][0
 | `https://example.atlassian.net/browse/TEAM-123` | `TEAM-123` |
 | `team-123`, `A-1`, `TEAM-0`, `TEAM-012`, `prefixTEAM-123` | None |
 
-Incident references match `\bINC[0-9]+\b` **in the PR title only**. Any number of digits is accepted, including leading zeroes, so both `INC123456` and `INC0012345` pass. The label name must be exactly `no issue reference`, ignoring case.
+ServiceNow incident and request references match `\b(?:INC|REQ)[0-9]+\b` **in the PR title only**. Prefixes are case-sensitive, and any number of digits is accepted, including leading zeroes: `INC123456`, `INC0012345`, `REQ1234`, and `REQ0012345` all pass. Embedded references such as `XREQ1234` or `REQ1234suffix` do not qualify. These references are syntax exemptions and bypass all Jira checks and writes, even if the title also contains Jira keys. The label name must be exactly `no issue reference`, ignoring case.
 
 Custom on-premise project-key formats (for example, keys containing underscores) are not supported; the parser uses the Cloud-compatible syntax above.
 
@@ -230,4 +234,4 @@ CI runs the tests on Node 24 across Linux, macOS, and Windows. Tests cover match
 
 The regex parser (`src/jira.mjs`) and synchronous `check()` function in `src/action.mjs` remain separate from Jira behavior. `src/jira-api.mjs` owns credentials and REST requests; `src/jira-integration.mjs` owns validation, fallback, component assignment, and remote-link creation. The action runner connects them.
 
-The action reads `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, and `GITHUB_OUTPUT` from the runner. GitHub supplies inputs as `INPUT_PROJECT-KEYS`, `INPUT_JIRA-SECRET`, `INPUT_JIRA-URL`, and `INPUT_JIRA-REMOTE-LINKS`. For a local manual run, set the event variables and run `node src/index.mjs`. No GitHub token is needed.
+The action reads `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, and `GITHUB_OUTPUT` from the runner. GitHub supplies inputs as `INPUT_PROJECT-KEYS`, `INPUT_JIRA-SECRET`, `INPUT_JIRA-URL`, `INPUT_JIRA-REMOTE-LINKS`, and `INPUT_JIRA-COMPONENTS`. For a local manual run, set the event variables and run `node src/index.mjs`. No GitHub token is needed.

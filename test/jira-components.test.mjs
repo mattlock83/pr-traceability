@@ -61,6 +61,57 @@ function client(mock) {
   return createJiraClient({ secret, url, ...mock, log() {} });
 }
 
+for (const components of ['false', ' false ']) {
+  for (const remoteLinks of ['false', 'true']) {
+    test(`Jira components: disabled (${JSON.stringify(components)}) preserves validation and links=${remoteLinks}`, async () => {
+      const mock = mockJira({ issues: { 'TEAM-1': issue(), 'OPS-2': issue('OPS') } });
+      const checked = await applyJira(result(['TEAM-1', 'OPS-2']), event(), { secret, url, components, remoteLinks, ...mock, log() {} });
+      assert.equal(checked.status, 'passed');
+      assert.match(checked.reason, /Referenced Jira issues exist and are outside Done/);
+      assert.doesNotMatch(checked.reason, /component/i);
+      assert.deepEqual(mock.requests.map(({ method, path }) => ({ method, path })), [
+        { method: 'GET', path: '/issue/TEAM-1' },
+        { method: 'GET', path: '/issue/OPS-2' },
+        ...(remoteLinks === 'true' ? [
+          { method: 'POST', path: '/issue/TEAM-1/remotelink' },
+          { method: 'POST', path: '/issue/OPS-2/remotelink' },
+        ] : []),
+      ]);
+      assert.deepEqual(mock.projects, {});
+      assert.deepEqual(mock.issues['TEAM-1'].fields.components, []);
+      assert.deepEqual(mock.issues['OPS-2'].fields.components, []);
+    });
+  }
+}
+
+for (const components of [undefined, '', ' ', 'true', ' true ']) {
+  test(`Jira components: enabled by default or explicit ${JSON.stringify(components)}`, async () => {
+    const mock = mockJira({ projects: { TEAM: [{ id: '8', name }] } });
+    const checked = await applyJira(result(), event(), { secret, url, components, ...mock, log() {} });
+    assert.match(checked.reason, /Jira repository component assigned/);
+    assert.deepEqual(mock.requests.map(({ method, path }) => ({ method, path })), [
+      { method: 'GET', path: '/issue/TEAM-1' },
+      { method: 'PUT', path: '/issue/TEAM-1' },
+    ]);
+    assert.deepEqual(mock.issues['TEAM-1'].fields.components, [{ id: '8', name }]);
+  });
+}
+
+test('Jira components: disabling does not exempt Done issues from validation', async () => {
+  const mock = mockJira({ issues: { 'TEAM-1': issue('TEAM', [], 'done') } });
+  await assert.rejects(applyJira(result(), event(), { secret, url, components: 'false', remoteLinks: 'true', ...mock, log() {} }), /TEAM-1: Done/);
+  assert.deepEqual(mock.requests.map(({ method, path }) => ({ method, path })), [{ method: 'GET', path: '/issue/TEAM-1' }]);
+});
+
+test('Jira components: disabling preserves regex fallback for Jira outages', async () => {
+  const mock = mockJira({ intercept: () => new Response('Unavailable', { status: 503 }) });
+  const checked = await applyJira(result(), event(), { secret, url, components: 'false', ...mock, log() {} });
+  assert.equal(checked.status, 'passed');
+  assert.match(checked.reason, /passed regex-only check/);
+  assert.doesNotMatch(checked.reason, /component/i);
+  assert.equal(mock.requests.length, 1);
+});
+
 test('Jira components: create and assign once while preserving existing issue components', async () => {
   const mock = mockJira({ issues: { 'TEAM-1': issue('TEAM', [{ id: '7' }]) } });
   const jira = client(mock);

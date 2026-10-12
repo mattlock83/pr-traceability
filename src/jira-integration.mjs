@@ -2,15 +2,18 @@ import { createJiraClient } from './jira-api.mjs';
 
 /** Enrich a successful regex result; integration outages must not block a PR. */
 export async function applyJira(result, event, {
-  secret, url, remoteLinks = '', fetchImpl = globalThis.fetch, signal, log = console.log,
+  secret, url, remoteLinks = '', components = 'true', fetchImpl = globalThis.fetch, signal, log = console.log,
 } = {}) {
   if (!result.references.length || !secret?.trim() || event.action === 'closed') return result;
   let jira;
   let linksEnabled;
+  let componentsEnabled;
   try {
     const links = remoteLinks.trim();
-    if (!['', 'true', 'false'].includes(links)) throw new Error();
+    const repositoryComponents = components.trim();
+    if ([links, repositoryComponents].some((value) => !['', 'true', 'false'].includes(value))) throw new Error();
     linksEnabled = links === 'true';
+    componentsEnabled = repositoryComponents !== 'false';
     jira = createJiraClient({ secret, url, fetchImpl, signal, log });
   } catch {
     return { ...result, reason: `${result.reason}; Jira configuration unavailable, using regex only` };
@@ -40,19 +43,21 @@ export async function applyJira(result, event, {
     ? 'Jira validation unavailable; passed regex-only check'
     : 'Referenced Jira issues exist and are outside Done'];
   if (event.action === 'opened') {
-    const repository = event.repository?.full_name;
-    const validRepository = typeof repository === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository);
-    let failed = unavailable || !validRepository;
-    if (validRepository) {
-      for (const { reference, issue } of verified) {
-        try {
-          await jira.assignRepositoryComponent(reference, issue, repository);
-        } catch {
-          failed = true;
+    if (componentsEnabled) {
+      const repository = event.repository?.full_name;
+      const validRepository = typeof repository === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository);
+      let failed = unavailable || !validRepository;
+      if (validRepository) {
+        for (const { reference, issue } of verified) {
+          try {
+            await jira.assignRepositoryComponent(reference, issue, repository);
+          } catch {
+            failed = true;
+          }
         }
       }
+      reasons.push(failed ? 'Some Jira repository components could not be assigned' : 'Jira repository component assigned');
     }
-    reasons.push(failed ? 'Some Jira repository components could not be assigned' : 'Jira repository component assigned');
     if (linksEnabled) {
       let failed = unavailable;
       for (const { reference } of verified) {

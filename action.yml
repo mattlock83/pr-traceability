@@ -1,5 +1,5 @@
 name: PR traceability
-description: Require a Jira reference in a PR title or source branch, with bot, incident, and label exemptions.
+description: Require a Jira reference in a PR title or source branch, with bot, ServiceNow incident/request, and label exemptions.
 branding:
   icon: link
   color: blue
@@ -8,7 +8,7 @@ inputs:
     description: Optional comma-separated uppercase Jira project keys (e.g. TEAM,OPS). At least one reference must match an allowed project. Empty allows any project.
     required: false
   jira-secret:
-    description: Optional Jira Cloud JSON credentials containing email and apiToken. Enables issue validation and creates/assigns the org/repo component on PR open.
+    description: Optional Jira Cloud JSON credentials containing email and apiToken. Enables issue validation and repository components when enabled.
     required: false
   jira-url:
     description: Jira Cloud HTTPS base URL. Required with jira-secret unless its JSON contains baseUrl. Uses REST API v3.
@@ -17,6 +17,10 @@ inputs:
     description: Set to true to create PR remote links on validated referenced issues when the PR opens. Requires Jira credentials.
     required: false
     default: 'false'
+  jira-components:
+    description: Set to false to disable creating and assigning the org/repo Jira component on PR open. Requires Jira credentials; enabled by default.
+    required: false
+    default: 'true'
 outputs:
   result:
     description: passed, or skipped when the PR author is a bot.

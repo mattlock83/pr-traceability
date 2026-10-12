@@ -15,8 +15,8 @@ export function check(event, { projectKeys = '' } = {}) {
   if (pr.labels?.some((label) => label.name?.toLowerCase() === 'no issue reference')) {
     return { status: 'passed', reason: 'PR has the "no issue reference" label', references: [] };
   }
-  if (/\bINC[0-9]+\b/.test(pr.title ?? '')) {
-    return { status: 'passed', reason: 'PR title contains an incident reference', references: [] };
+  if (/\b(?:INC|REQ)[0-9]+\b/.test(pr.title ?? '')) {
+    return { status: 'passed', reason: 'PR title contains a ServiceNow incident or request reference', references: [] };
   }
   const projects = new Set(projectKeys.trim() ? projectKeys.split(',').map((key) => key.trim()) : []);
   if ([...projects].some((key) => !/^[A-Z][A-Z0-9]{1,254}$/.test(key))) {
@@ -28,7 +28,7 @@ export function check(event, { projectKeys = '' } = {}) {
     const requiredKey = projects.size
       ? `a Jira key from an allowed project (${[...projects].join(', ')})`
       : 'a Jira key (e.g. PROJ-123)';
-    throw new Error(`No issue reference found: add ${requiredKey} to the PR title or source branch; add an incident reference (e.g. INC123456) to the PR title; or apply the "no issue reference" label`);
+    throw new Error(`No issue reference found: add ${requiredKey} to the PR title or source branch; add a ServiceNow incident or request reference (e.g. INC123456 or REQ123456) to the PR title; or apply the "no issue reference" label`);
   }
   return {
     status: 'passed',
@@ -55,7 +55,7 @@ export async function run({ env = process.env, log = console.log, fetchImpl = gl
   }
   const result = await applyJira(check(event, { projectKeys: env['INPUT_PROJECT-KEYS'] }), event, {
     secret: env['INPUT_JIRA-SECRET'], url: env['INPUT_JIRA-URL'],
-    remoteLinks: env['INPUT_JIRA-REMOTE-LINKS'], fetchImpl, log,
+    remoteLinks: env['INPUT_JIRA-REMOTE-LINKS'], components: env['INPUT_JIRA-COMPONENTS'], fetchImpl, log,
   });
   const references = JSON.stringify(result.references);
   if (env.GITHUB_OUTPUT) {

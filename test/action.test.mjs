@@ -15,6 +15,10 @@ for (const [name, fields, status, references = []] of [
   ['label casing', { labels: [{ name: 'No Issue Reference' }] }, 'passed'],
   ['incident title', { title: 'Fix outage (INC123456)' }, 'passed'],
   ['long incident', { title: 'INC0012345: repair' }, 'passed'],
+  ['request title', { title: 'Fulfil request (REQ1234)' }, 'passed'],
+  ['request with leading zeroes', { title: 'REQ0012345: provision access' }, 'passed'],
+  ['short request', { title: 'REQ1' }, 'passed'],
+  ['request-like Jira key', { title: 'REQ-1234' }, 'passed', ['REQ-1234']],
   ['title keys', { title: 'TEAM-123 and OPS-4' }, 'passed', ['TEAM-123', 'OPS-4']],
   ['branch key', { head: { ref: 'feature/TEAM-123-fix' } }, 'passed', ['TEAM-123']],
   ['deduplicate title and branch', { title: 'TEAM-123', head: { ref: 'TEAM-123-OPS-4' } }, 'passed', ['TEAM-123', 'OPS-4']],
@@ -33,7 +37,13 @@ for (const [name, fields] of [
   ['embedded incident', { title: 'XINC123456 INC123456x' }],
   ['lowercase incident', { title: 'inc123456' }],
   ['incident in source branch', { head: { ref: 'fix/INC123456' } }],
-  ['PR body ignored', { body: 'TEAM-123 INC123456 no issue reference' }],
+  ['embedded request', { title: 'XREQ1234 REQ1234x' }],
+  ['underscore-adjacent request', { title: 'fix_REQ1234 REQ1234_fix' }],
+  ['lowercase request', { title: 'req1234' }],
+  ['request without digits', { title: 'REQ' }],
+  ['request with separated digits', { title: 'REQ 1234 REQ+1234' }],
+  ['request in source branch', { head: { ref: 'feature/REQ1234' } }],
+  ['PR body ignored', { body: 'TEAM-123 INC123456 REQ1234 no issue reference' }],
   ['base branch ignored', { base: { ref: 'TEAM-123' } }],
   ['no match', { title: 'Fix' }],
 ]) {
@@ -94,6 +104,7 @@ for (const projectKeys of [
 for (const [fields, status] of [
   [{ user: { type: 'Bot' } }, 'skipped'],
   [{ title: 'INC123456' }, 'passed'],
+  [{ title: 'REQ1234' }, 'passed'],
   [{ labels: [{ name: 'no issue reference' }] }, 'passed'],
 ]) {
   test(`project-keys: exemption takes precedence (${JSON.stringify(fields)})`, () => {
@@ -131,6 +142,51 @@ test('run: project-keys input filters action outputs', async (t) => {
   const result = await run({ env, log() {} });
   assert.deepEqual(result.references, ['OPS-2']);
   assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\nresult=passed\njira-references=["OPS-2"]\n');
+});
+
+for (const reference of ['INC123456', 'REQ001234']) {
+  test(`run: ${reference} bypasses Jira validation and writes even with a Jira secret`, async (t) => {
+    const body = event({ title: `${reference}: fix TEAM-1` });
+    body.action = 'opened';
+    const env = await environment(t, body);
+    Object.assign(env, {
+      'INPUT_PROJECT-KEYS': 'invalid', 'INPUT_JIRA-URL': 'https://jira.example.com',
+      'INPUT_JIRA-SECRET': JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' }),
+      'INPUT_JIRA-REMOTE-LINKS': 'true', 'INPUT_JIRA-COMPONENTS': 'true',
+    });
+    let requests = 0;
+    const checked = await run({ env, log() {}, fetchImpl: async () => { requests++; return Response.json({}); } });
+    assert.equal(checked.status, 'passed');
+    assert.deepEqual(checked.references, []);
+    assert.match(checked.reason, /ServiceNow incident or request reference/);
+    assert.equal(requests, 0);
+    assert.equal(await readFile(env.GITHUB_OUTPUT, 'utf8'), 'previous=value\nresult=passed\njira-references=[]\n');
+  });
+}
+
+test('run: jira-components=false disables component operations while preserving validation and remote links', async (t) => {
+  const body = event({ title: 'TEAM-1', html_url: 'https://github.com/org/repo/pull/42' });
+  body.action = 'opened';
+  const env = await environment(t, body);
+  Object.assign(env, {
+    'INPUT_JIRA-URL': 'https://jira.example.com',
+    'INPUT_JIRA-SECRET': JSON.stringify({ email: 'ci@example.com', apiToken: 'secret-token' }),
+    'INPUT_JIRA-REMOTE-LINKS': 'true', 'INPUT_JIRA-COMPONENTS': 'false',
+  });
+  const requests = [];
+  const checked = await run({ env, log() {}, fetchImpl: async (url, options) => {
+    requests.push({ url, method: options.method });
+    return options.method === 'GET'
+      ? Response.json({ fields: { status: { statusCategory: { key: 'new' } } } })
+      : Response.json({ id: 1 });
+  } });
+  assert.equal(checked.status, 'passed');
+  assert.doesNotMatch(checked.reason, /component/i);
+  assert.match(checked.reason, /PR remote links created/);
+  assert.deepEqual(requests, [
+    { url: 'https://jira.example.com/rest/api/3/issue/TEAM-1?fields=status,project,components', method: 'GET' },
+    { url: 'https://jira.example.com/rest/api/3/issue/TEAM-1/remotelink', method: 'POST' },
+  ]);
 });
 
 test('run: optional Jira inputs validate allowed references and create remote links on open', async (t) => {
