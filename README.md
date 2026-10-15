@@ -51,7 +51,7 @@ jobs:
   traceability:
     runs-on: ubuntu-latest
     steps:
-      - uses: phrond/pr-traceability@main
+      - uses: mattlock83/pr-traceability@main
 ```
 
 Pin to a release tag or full commit SHA when publishing a stable version. The action has **no required inputs**. Make the `traceability` check required in your repository's branch protection or ruleset to enforce it before merging.
@@ -67,7 +67,7 @@ Fork PRs work in regex-only mode, subject to GitHub's normal workflow approval s
 Set `project-keys` to a comma-separated list of allowed Jira project keys:
 
 ```yaml
-- uses: phrond/pr-traceability@main
+- uses: mattlock83/pr-traceability@main
   with:
     project-keys: 'TEAM,OPS'
 ```
@@ -95,7 +95,7 @@ jobs:
   traceability:
     runs-on: ubuntu-latest
     steps:
-      - uses: phrond/pr-traceability@main
+      - uses: mattlock83/pr-traceability@main
         with:
           project-keys: 'TEAM,OPS' # Optional
           jira-url: 'https://your-team.atlassian.net'
@@ -173,7 +173,7 @@ This requires Jira components in a [company-managed project](https://support.atl
 
 ### PR remote links
 
-Set `jira-remote-links: 'true'` with Jira credentials to create a remote link on each validated referenced issue during the PR's **`opened` event**. The link includes the PR number, title, and URL. A stable `globalId` in the form `org/repo/PR-number` (for example, `phrond/pr-traceability/42`) makes reruns update the same link instead of creating duplicates. See the [Jira Cloud create/update API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/).
+Set `jira-remote-links: 'true'` with Jira credentials to create a remote link on each validated referenced issue during the PR's **`opened` event**. The link includes the PR number, title, and URL. A stable `globalId` in the form `org/repo/PR-number` (for example, `mattlock83/pr-traceability/42`) makes reruns update the same link instead of creating duplicates. See the [Jira Cloud create/update API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/).
 
 Remote-link write errors do not fail the check; the result log reports incomplete updates. During validation fallback, links are written only for references whose issue checks completed successfully. Rerun the `opened` event to retry a failed write; the action uses that event's original title and references.
 
