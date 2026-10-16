@@ -20,17 +20,12 @@ func FindReferences(text string) []string {
 	references := make([]string, 0)
 	seen := make(map[string]bool)
 	for _, match := range issueKey.FindAllStringIndex(text, -1) {
-		if match[0] > 0 {
-			before, _ := utf8.DecodeLastRuneInString(text[:match[0]])
-			if unicode.IsLetter(before) || unicode.IsNumber(before) {
-				continue
-			}
-		}
-		if match[1] < len(text) {
-			after, _ := utf8.DecodeRuneInString(text[match[1]:])
-			if unicode.IsLetter(after) || unicode.IsNumber(after) {
-				continue
-			}
+		// Empty edge slices decode as RuneError, which is neither a letter nor a number.
+		before, _ := utf8.DecodeLastRuneInString(text[:match[0]])
+		after, _ := utf8.DecodeRuneInString(text[match[1]:])
+		if unicode.IsLetter(before) || unicode.IsNumber(before) ||
+			unicode.IsLetter(after) || unicode.IsNumber(after) {
+			continue
 		}
 
 		reference := text[match[0]:match[1]]

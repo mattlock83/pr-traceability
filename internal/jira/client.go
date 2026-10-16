@@ -138,15 +138,11 @@ func (c *Client) logResponseFailure(method, path string, status int, detail stri
 	for _, value := range c.redactions {
 		detail = strings.ReplaceAll(detail, value, "[REDACTED]")
 	}
-	var quoted bytes.Buffer
-	encoder := json.NewEncoder(&quoted)
-	encoder.SetEscapeHTML(false)
-	_ = encoder.Encode(detail)
 	code := "request failed"
 	if status != 0 {
 		code = strconv.Itoa(status)
 	}
-	c.log(fmt.Sprintf("Jira %s %s: %s; body: %s", method, path, code, strings.TrimSuffix(quoted.String(), "\n")))
+	c.log(fmt.Sprintf("Jira %s %s: %s; body: %q", method, path, code, detail))
 }
 
 // GetIssue returns nil for Jira's canonical missing-or-inaccessible response.

@@ -275,15 +275,15 @@ func TestClientDiagnosticsQuoteBodiesAndOmitHeaders(t *testing.T) {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var logs []string
 			client := newTestClient(t, func(*http.Request) (*http.Response, error) {
-				return clientResponse(status, "Upstream diagnostic\n::error::plain text"), nil
+				return clientResponse(status, "Upstream \"diagnostic\"\r\n::error::plain text\x00\x1b[31m"), nil
 			}, &logs)
 			if _, err := client.GetIssue(context.Background(), "TEAM-1"); err == nil {
 				t.Fatal("expected error")
 			}
-			if len(logs) != 1 || !strings.Contains(logs[0], `body: "Upstream diagnostic\n::error::plain text"`) {
+			if len(logs) != 1 || !strings.Contains(logs[0], `body: "Upstream \"diagnostic\"\r\n::error::plain text\x00\x1b[31m"`) {
 				t.Fatalf("logs = %v", logs)
 			}
-			for _, forbidden := range []string{"Authorization", "Accept", "X-Private-Header", "must-not-appear", "\r", "\n"} {
+			for _, forbidden := range []string{"Authorization", "Accept", "X-Private-Header", "must-not-appear", "\r", "\n", "\x00", "\x1b"} {
 				if strings.Contains(logs[0], forbidden) {
 					t.Errorf("log contains %q: %s", forbidden, logs[0])
 				}
