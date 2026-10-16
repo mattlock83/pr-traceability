@@ -1,6 +1,6 @@
 # PR traceability
 
-A GitHub Action written in plain JavaScript, with no external dependencies or build step. It requires a Jira issue reference in a pull request's **title** or **source branch name** and works without configuration or a Jira secret.
+A GitHub Action written in Go, using only the standard library. It requires a Jira issue reference in a pull request's **title** or **source branch name** and works without configuration or a Jira secret.
 
 - **Traceability:** find and deduplicate Jira references, optionally restricted to specific project keys.
 - **Jira validation, with a secret:** check that every matching issue exists and is outside the Done status category. Integration errors fall back to the regex check.
@@ -13,7 +13,9 @@ The check also succeeds when:
 - The **PR title** contains a ServiceNow incident or request reference such as `INC123456` or `REQ1234`.
 - The PR has the **`no issue reference`** label.
 
-Without Jira credentials, the action checks syntax only and makes no network requests. GitHub runs the source directly using its provided Node 24 runtime; no checkout or runtime setup is needed in the consuming workflow. No GitHub token or API permissions are required. The action supports Linux, macOS, and Windows runners. No Docker, npm install, bundler, compiled binaries, or external packages are required.
+Without Jira credentials, the action checks syntax only and makes no network requests. No GitHub token or API permissions are required. The action supports Linux, macOS, and Windows runners with **Go 1.24 or newer and Bash** installed. GitHub-hosted runners provide both; self-hosted runners must install them.
+
+The composite action compiles and runs its own source with `go run`, inside the action's checkout. The consuming repository does not need a checkout step. There are no external Go modules, Docker images, Node runtime, or bundled binaries. The action disables automatic Go toolchain and module downloads, so it uses the installed Go toolchain and fails if it is too old. For a predictable Go version, add `actions/setup-go` before this action, as shown below.
 
 ## Why PR titles and source branches?
 
@@ -51,10 +53,23 @@ jobs:
   traceability:
     runs-on: ubuntu-latest
     steps:
-      - uses: mattlock83/pr-traceability@main
+      - uses: mattlock83/pr-traceability@rewrite-go
 ```
 
-Pin to a release tag or full commit SHA when publishing a stable version. The action has **no required inputs**. Make the `traceability` check required in your repository's branch protection or ruleset to enforce it before merging.
+The Go rewrite is currently on the `rewrite-go` branch. Pin to a release tag or full commit SHA when publishing a stable version. The action has **no required inputs**. Make the `traceability` check required in your repository's branch protection or ruleset to enforce it before merging.
+
+Optionally select a Go version explicitly, especially on self-hosted runners:
+
+```yaml
+steps:
+  - uses: actions/setup-go@v6
+    with:
+      go-version: '1.24.x'
+      cache: false
+  - uses: mattlock83/pr-traceability@rewrite-go
+```
+
+`setup-go` may download the requested toolchain; it is optional and is not called by the action itself. Caching is disabled because this project has no external Go modules or `go.sum` file.
 
 Title edits, new commits, and adding or removing labels rerun the check. Commit messages, PR descriptions, the base branch, the event sender, and the workflow actor do not count. Bot detection uses the PR author's GitHub `type: Bot` or a login ending in `[bot]`; ordinary user accounts used for automation are not automatically exempt.
 
@@ -67,7 +82,7 @@ Fork PRs work in regex-only mode, subject to GitHub's normal workflow approval s
 Set `project-keys` to a comma-separated list of allowed Jira project keys:
 
 ```yaml
-- uses: mattlock83/pr-traceability@main
+- uses: mattlock83/pr-traceability@rewrite-go
   with:
     project-keys: 'TEAM,OPS'
 ```
@@ -95,7 +110,7 @@ jobs:
   traceability:
     runs-on: ubuntu-latest
     steps:
-      - uses: mattlock83/pr-traceability@main
+      - uses: mattlock83/pr-traceability@rewrite-go
         with:
           project-keys: 'TEAM,OPS' # Optional
           jira-url: 'https://your-team.atlassian.net'
@@ -145,7 +160,9 @@ With credentials supplied, **every matching reference** must exist and have a `s
 
 Only matching references from the PR title or source branch are validated and eligible for components and remote links. Parent issues and epics are checked only if they are themselves referenced in the PR title or source branch and match `project-keys` when configured.
 
-Invalid Jira inputs, malformed credentials or responses, authentication failures, rate limits, connection errors, and timeouts fall back to regex matching. A confirmed missing/inaccessible referenced issue or Done referenced issue still fails, even if another request errors. Only recognized Jira issue-not-found 404 bodies count as missing issues; HTML, empty, and unrelated JSON 404s fall back. Jira can return the same recognized 404 for missing issues and permission/configuration problems, so those cannot always be distinguished. Failed HTTP responses log the status and response body for triage; invalid JSON responses are also logged. Request and response headers are never logged. Credential values are redacted if echoed in a response body, and bodies are quoted on one line so their contents cannot become workflow commands. Network errors without a response log that no body is available.
+Invalid Jira inputs, malformed credentials or responses, authentication failures, rate limits, connection errors, and timeouts fall back to regex matching. A confirmed missing/inaccessible referenced issue or Done referenced issue still fails, even if another request errors. Only recognized Jira issue-not-found 404 bodies count as missing issues; HTML, empty, and unrelated JSON 404s fall back. Jira can return the same recognized 404 for missing issues and permission/configuration problems, so those cannot always be distinguished.
+
+Failed HTTP responses log the status and response body for triage; invalid JSON responses are also logged. Other failures, such as missing status or component metadata, log a sanitized explanation with the issue reference and operation. Invalid configuration is also explained without echoing input values. Request and response headers are never logged. Credential values are redacted if echoed in a response body, and bodies are quoted on one line so their contents cannot become workflow commands. Network errors without a response log that no body is available.
 
 Requests have a 10-second timeout and share a 30-second total budget per action run. A fallback still requires a regex reference from an allowed project; API failure never excuses missing traceability. Bot, ServiceNow incident/request, and label exemptions bypass all Jira checks and writes. With no secret, all Jira features are skipped.
 
@@ -210,28 +227,37 @@ References are regex matches, not a guarantee of successful Jira validation or l
 
 ## Reuse the parser
 
-The `src/jira.mjs` module is independent of GitHub Actions and has no dependencies. It can be imported by other JavaScript programs:
+The public `jira` package is independent of GitHub Actions and uses only the standard library. Other Go programs can import it:
 
-```js
-import { findReferences } from './src/jira.mjs';
+```go
+package main
 
-const refs = findReferences('Fix TEAM-123 and OPS-456; follow-up to TEAM-123');
-console.log(refs); // ['TEAM-123', 'OPS-456']
+import (
+    "fmt"
+
+    "github.com/mattlock83/pr-traceability/jira"
+)
+
+func main() {
+    refs := jira.FindReferences("Fix TEAM-123 and OPS-456; follow-up to TEAM-123")
+    fmt.Println(refs) // [TEAM-123 OPS-456]
+}
 ```
 
-`findReferences` returns all distinct matches in first-seen order, or `[]` when there are no matches.
+`FindReferences` returns all distinct matches in first-seen order, or an empty slice when there are no matches. Add this module to the consuming program with `go get github.com/mattlock83/pr-traceability@rewrite-go` while testing the rewrite; use a release tag or commit SHA for a stable dependency. Private repository access must be configured when importing the module from another program.
 
 ## Development
 
-Use Node 24 or newer. Run the built-in test runner directly; there is nothing to install or build:
+Use Go 1.24 or newer. Tests and static checks use the Go toolchain; there are no external modules to install:
 
 ```sh
-node --test
-node --test --experimental-test-coverage
+go test ./...
+go test -race -cover ./...
+go vet ./...
 ```
 
-CI runs the tests on Node 24 across Linux, macOS, and Windows. Tests cover matching, exemptions, project restrictions, action outputs, Jira Cloud v3 authentication, referenced-issue checks, fallback, response logging, repository components, and remote links on PR open. Jira tests use simulated responses and require no credentials or network access.
+CI runs race-enabled tests, coverage, formatting checks, and `go vet` across Linux, macOS, and Windows, using the Go 1.24 patch series. It also invokes the composite action with a synthetic PR to verify input mapping, project filtering, and forwarded outputs without Jira credentials. Race-enabled tests require a C compiler; normal tests and the action do not. Tests cover matching, exemptions, project restrictions, action outputs, Jira Cloud v3 authentication, referenced-issue checks, fallback, response logging, repository components, and remote links on PR open. Jira tests use simulated responses and require no credentials or external network access.
 
-The regex parser (`src/jira.mjs`) and synchronous `check()` function in `src/action.mjs` remain separate from Jira behavior. `src/jira-api.mjs` owns credentials and REST requests; `src/jira-integration.mjs` owns validation, fallback, component assignment, and remote-link creation. The action runner connects them.
+The public `jira` package owns reference parsing. `internal/action` owns event handling, traceability checks, outputs, and Jira orchestration. `internal/jira` owns credentials, REST requests, and remote links, with component assignment in `components.go`. `cmd/pr-traceability` connects them as a command-line program.
 
-The action reads `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, and `GITHUB_OUTPUT` from the runner. GitHub supplies inputs as `INPUT_PROJECT-KEYS`, `INPUT_JIRA-SECRET`, `INPUT_JIRA-URL`, `INPUT_JIRA-REMOTE-LINKS`, and `INPUT_JIRA-COMPONENTS`. For a local manual run, set the event variables and run `node src/index.mjs`. No GitHub token is needed.
+The action reads `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, and `GITHUB_OUTPUT` from the runner. The composite action explicitly maps its inputs to `INPUT_PROJECT-KEYS`, `INPUT_JIRA-SECRET`, `INPUT_JIRA-URL`, `INPUT_JIRA-REMOTE-LINKS`, and `INPUT_JIRA-COMPONENTS`. For a local manual run, set the event variables and any inputs using those environment variable names, then run `go run ./cmd/pr-traceability` from the repository root. No GitHub token is needed.

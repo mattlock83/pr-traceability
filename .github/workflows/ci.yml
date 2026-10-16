@@ -15,8 +15,52 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-go@v6
         with:
-          node-version: '24'
+          go-version: '1.24.x'
+          cache: false
       - name: Test
-        run: node --test --experimental-test-coverage
+        run: go test -race -cover ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - name: Prepare action smoke test
+        id: smoke-fixture
+        shell: bash
+        run: |
+          event_file="$RUNNER_TEMP/pr-traceability-event.json"
+          startup_file="$RUNNER_TEMP/pr-traceability-smoke.bash"
+          cat > "$event_file" <<'JSON'
+          {"action":"opened","pull_request":{"number":42,"title":"Fix TEAM-123 and OTHER-456","head":{"ref":"feature/TEAM-123"},"user":{"type":"User","login":"developer"},"labels":[]}}
+          JSON
+          # Test-only Bash startup overrides the event inside the action's shell.
+          # GITHUB_OUTPUT stays runner-managed so composite forwarding is tested.
+          cat > "$startup_file" <<'BASH'
+          export GITHUB_EVENT_NAME=pull_request
+          export GITHUB_EVENT_PATH="$PR_TRACEABILITY_SMOKE_EVENT"
+          BASH
+          printf 'event=%s\nstartup=%s\n' "$event_file" "$startup_file" >> "$GITHUB_OUTPUT"
+      - name: Smoke test the composite action without Jira credentials
+        id: smoke
+        uses: ./
+        env:
+          BASH_ENV: ${{ steps.smoke-fixture.outputs.startup }}
+          PR_TRACEABILITY_SMOKE_EVENT: ${{ steps.smoke-fixture.outputs.event }}
+        with:
+          project-keys: TEAM
+          jira-remote-links: 'true'
+          jira-components: 'false'
+      - name: Check composite action outputs
+        shell: bash
+        env:
+          SMOKE_RESULT: ${{ steps.smoke.outputs.result }}
+          SMOKE_REFERENCES: ${{ steps.smoke.outputs.jira-references }}
+        run: |
+          test "$SMOKE_RESULT" = passed
+          test "$SMOKE_REFERENCES" = '["TEAM-123"]'
+      - name: Clean up smoke test fixture
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/pr-traceability-event.json" "$RUNNER_TEMP/pr-traceability-smoke.bash"

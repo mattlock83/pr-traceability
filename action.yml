@@ -24,8 +24,25 @@ inputs:
 outputs:
   result:
     description: passed, or skipped when the PR author is a bot.
+    value: ${{ steps.traceability.outputs.result }}
   jira-references:
     description: JSON array of distinct matching Jira references, filtered by project-keys when supplied; empty for exemptions.
+    value: ${{ steps.traceability.outputs.jira-references }}
 runs:
-  using: node24
-  main: src/index.mjs
+  using: composite
+  steps:
+    - name: Check PR traceability
+      id: traceability
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        INPUT_PROJECT-KEYS: ${{ inputs.project-keys }}
+        INPUT_JIRA-SECRET: ${{ inputs.jira-secret }}
+        INPUT_JIRA-URL: ${{ inputs.jira-url }}
+        INPUT_JIRA-REMOTE-LINKS: ${{ inputs.jira-remote-links }}
+        INPUT_JIRA-COMPONENTS: ${{ inputs.jira-components }}
+        GOTOOLCHAIN: local
+        GOWORK: 'off'
+        GOPROXY: 'off'
+        GOSUMDB: 'off'
+      run: go run ./cmd/pr-traceability

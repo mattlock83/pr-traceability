@@ -1,2 +1,5 @@
 /coverage/
+/coverage.out
+/pr-traceability
+/pr-traceability.exe
 .DS_Store
